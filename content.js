@@ -180,11 +180,23 @@
   window.addEventListener('__GARRETT_SOURCE_CHUNK__', (e) => {
     if (e.detail && e.detail.chunk) {
       const chunk = e.detail.chunk;
-      if (isInitBox(chunk)) {
+      const isInit = isInitBox(chunk);
+      if (isInit) {
         lastInitChunk = chunk;
       }
+      for (const state of videoRegistry.values()) {
+        const v = state.video;
+        if (v && (!v.paused || v.currentTime > 0)) {
+          if (isInit) {
+            state.initChunk = chunk;
+          } else {
+            if (!state.capturedChunks) state.capturedChunks = [];
+            state.capturedChunks.push(chunk);
+          }
+        }
+      }
       recentChunks.push(chunk);
-      if (recentChunks.length > 60) recentChunks.shift();
+      if (recentChunks.length > 200) recentChunks.shift();
     }
   });
 
@@ -1172,7 +1184,8 @@
         manifestText,
         duration: realDur,
         customFetchText,
-        customFetchBuffer
+        customFetchBuffer,
+        initBuffer: state.initChunk || lastInitChunk
       });
 
       const filename = generateFilename(state.video, result.ext || 'mp4');
@@ -1213,10 +1226,31 @@
       }
 
       const realDur = resolveRealVideoDuration(state);
+
+      // Priority Path: Authentic MSE captured chunks from the player's active SourceBuffer
+      if (state.capturedChunks && state.capturedChunks.length >= 3) {
+        const initBuf = state.initChunk || lastInitChunk;
+        if (initBuf && isInitBox(initBuf)) {
+          console.log(`[Garrett] Assembling ${state.capturedChunks.length} authentic MSE chunks with initialization header...`);
+          const allBuffers = [initBuf, ...state.capturedChunks];
+          const blob = new Blob(allBuffers, { type: 'video/mp4' });
+          if (blob.size >= 32768) {
+            const filename = generateFilename(state.video, 'mp4');
+            const saved = downloadBlobDirectly(blob, filename);
+            if (saved) {
+              showToast(`"What was taken is now safely kept." — Garrett (${filename})`, 6000);
+              safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
+              if (textEl) textEl.textContent = 'Kept!';
+              setTimeout(() => { if (textEl) textEl.textContent = 'Keep Video'; }, 4000);
+              return;
+            }
+          }
+        }
+      }
+
       let urlsToDownload = (segmentUrls && segmentUrls.length > 0) ? segmentUrls.slice() : [];
 
-      // Autonomous Segment Pattern Synthesis:
-      // If segmentUrls doesn't yet cover the full duration, synthesize the complete sequence!
+      // Autonomous Segment Pattern Synthesis (only for non-HMAC streams)
       if (assembler.synthesizeSegmentUrls && urlsToDownload.length > 0) {
         const sampleUrl = urlsToDownload[urlsToDownload.length - 1];
         const syn = assembler.synthesizeSegmentUrls(sampleUrl, realDur);
@@ -1267,7 +1301,10 @@
         safeSendMessage({ action: 'streamProgress', videoId: state.id, completed, total, pct });
       };
 
-      const result = await assembler.assembleSegments(urlsToDownload, 'video/mp4', 'mp4', onProgress, customFetchBuffer, { allowTrailingLoss: true });
+      const result = await assembler.assembleSegments(urlsToDownload, 'video/mp4', 'mp4', onProgress, customFetchBuffer, {
+        allowTrailingLoss: true,
+        initBuffer: state.initChunk || lastInitChunk
+      });
       const filename = generateFilename(state.video, 'mp4');
       const saved = downloadBlobDirectly(result.blob, filename);
 

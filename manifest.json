@@ -38,13 +38,13 @@
       "all_frames": true,
       "match_about_blank": true,
       "css": ["content.css"],
-      "js": ["keeper.js", "streamAssembler.js", "garrettQueue.js", "content.js"],
+      "js": ["mux.min.js", "keeper.js", "streamAssembler.js", "garrettQueue.js", "content.js"],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["pageHook.js", "streamAssembler.js", "garrettQueue.js", "keeper.js", "hlsDownloader.js"],
+      "resources": ["mux.min.js", "pageHook.js", "streamAssembler.js", "garrettQueue.js", "keeper.js", "hlsDownloader.js"],
       "matches": ["<all_urls>"]
     }
   ],

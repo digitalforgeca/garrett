@@ -575,9 +575,10 @@
         let attempts = 0;
         let success = false;
 
-        // Polite request pacing between segment fetches
+        // Polite request pacing between segment fetches with randomized human-like jitter
         if (idx > 0) {
-          await new Promise(r => setTimeout(r, 120));
+          const jitter = 150 + Math.floor(Math.random() * 200);
+          await new Promise(r => setTimeout(r, jitter));
         }
 
         while (attempts < 3 && !success && !eofReached) {
@@ -630,6 +631,54 @@
         // First null after valid media segments signifies EOF
         break;
       }
+    }
+
+    function isFtypBox(buf) {
+      if (!buf || buf.byteLength < 8) return false;
+      try {
+        const view = new DataView(buf instanceof ArrayBuffer ? buf : buf.buffer, buf.byteOffset || 0, Math.min(8, buf.byteLength));
+        return view.getUint8(4) === 0x66 && view.getUint8(5) === 0x74 && view.getUint8(6) === 0x79 && view.getUint8(7) === 0x70;
+      } catch { return false; }
+    }
+
+    // Prepend initBuffer if the first buffer lacks an ftyp header
+    if (validBuffers.length > 0 && !isFtypBox(validBuffers[0]) && options.initBuffer && isFtypBox(options.initBuffer)) {
+      console.log('[Garrett] Stitching provided initSegment header into fragmented MP4 stream.');
+      validBuffers.unshift(options.initBuffer);
+    }
+
+    // Leverage mux.js for MPEG-TS / HLS transmuxing
+    const muxjsLib = (typeof globalThis !== 'undefined' && globalThis.muxjs) ||
+                     (typeof window !== 'undefined' && window.muxjs) ||
+                     (typeof self !== 'undefined' && self.muxjs);
+
+    const isTsStream = ext === 'ts' || (mimeType && mimeType.includes('mp2t')) || (validBuffers[0] && new Uint8Array(validBuffers[0])[0] === 0x47);
+    if (muxjsLib && muxjsLib.mp4 && muxjsLib.mp4.Transmuxer && isTsStream && validBuffers.length > 0) {
+      try {
+        console.log('[Garrett] Transmuxing MPEG-TS segments with mux.js into progressive MP4...');
+        const transmuxer = new muxjsLib.mp4.Transmuxer({ remux: true, keepOriginalTimestamps: true });
+        const initChunks = [];
+        const mediaChunks = [];
+        transmuxer.on('data', (segment) => {
+          if (segment.initSegment && segment.initSegment.byteLength > 0) initChunks.push(segment.initSegment);
+          if (segment.data && segment.data.byteLength > 0) mediaChunks.push(segment.data);
+        });
+        for (const b of validBuffers) {
+          transmuxer.push(new Uint8Array(b instanceof ArrayBuffer ? b : b.buffer));
+          transmuxer.flush();
+        }
+        if (mediaChunks.length > 0) {
+          const muxedBlob = new Blob([...initChunks, ...mediaChunks], { type: 'video/mp4' });
+          return { blob: muxedBlob, ext: 'mp4', totalBytes: muxedBlob.size, totalSegments: validBuffers.length };
+        }
+      } catch (transmuxErr) {
+        console.warn('[Garrett] mux.js transmuxing fallback:', transmuxErr.message);
+      }
+    }
+
+    // Validate fMP4 structure: Must have at least 1 init header and 1 media segment
+    if (validBuffers.length === 1 && total > 1) {
+      throw new Error('Incomplete stream: Only captured 1 fragment. Play more of the video before keeping.');
     }
 
     const blob = new Blob(validBuffers, { type: mimeType });
