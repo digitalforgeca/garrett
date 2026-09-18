@@ -502,9 +502,13 @@
     if (!pattern) return null;
 
     const segDuration = options.segmentDuration || (pattern.deltaTs ? pattern.deltaTs / 1000 : 2.0);
-    const expectedCount = targetDurationSeconds > 0
-      ? Math.max(Math.ceil(targetDurationSeconds / segDuration) + 1, 6)
-      : Math.max(pattern.currentIndex + 8, 15);
+    const safeDuration = (typeof targetDurationSeconds === 'number' && isFinite(targetDurationSeconds) && targetDurationSeconds > 0)
+      ? Math.min(targetDurationSeconds, 7200)
+      : 0;
+
+    const expectedCount = safeDuration > 0
+      ? Math.min(Math.max(Math.ceil(safeDuration / segDuration) + 1, 6), 600)
+      : Math.min(Math.max(pattern.currentIndex + 8, 15), 100);
 
     const urls = [];
     if (pattern.initUrl && options.includeInit !== false) {
@@ -578,12 +582,14 @@
     await Promise.all(workers);
 
     // Filter out trailing null buffers if stream reached end
+    let hasStarted = false;
     const validBuffers = [];
     for (let i = 0; i < total; i++) {
       if (buffers[i]) {
+        hasStarted = true;
         validBuffers.push(buffers[i]);
-      } else {
-        // First null signifies EOF; drop everything after
+      } else if (hasStarted) {
+        // First null after valid media segments signifies EOF
         break;
       }
     }

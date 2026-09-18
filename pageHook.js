@@ -237,19 +237,28 @@
     return null;
   }
 
-  function inspectObjectForVideo(obj, depth = 0) {
-    if (!obj || depth > 8 || typeof obj !== 'object') return null;
-    if (obj instanceof Node || obj === window || obj === document) return null;
+  function inspectObjectForVideo(obj, depth = 0, visited = new WeakSet()) {
+    if (!obj || depth > 3 || typeof obj !== 'object') return null;
+    if (obj instanceof (typeof Node !== 'undefined' ? Node : Object) && obj.nodeType) return null;
+    if (obj === window || obj === document) return null;
+    if (visited.has(obj)) return null;
+    visited.add(obj);
 
     const parsed = parseVideoMetadata(obj);
     if (parsed) return parsed;
 
     for (const k of Object.keys(obj)) {
-      if (k === '_owner' || k === 'alternate' || k === 'child' || k === 'sibling' || k === 'return' || k === 'stateNode') continue;
+      if (
+        k === '_owner' || k === 'alternate' || k === 'child' || k === 'sibling' ||
+        k === 'return' || k === 'stateNode' || k === 'memoizedState' || k === 'dependencies' ||
+        k === 'ref' || k === 'updater' || k.startsWith('__react')
+      ) {
+        continue;
+      }
       try {
         const val = obj[k];
         if (val && typeof val === 'object') {
-          const res = inspectObjectForVideo(val, depth + 1);
+          const res = inspectObjectForVideo(val, depth + 1, visited);
           if (res) return res;
         }
       } catch (e) {}
@@ -259,15 +268,16 @@
 
   function findReactVideoMetadata(element) {
     if (!element) return null;
+    const visited = new WeakSet();
 
-    // 1. Check DOM Element and Parent __reactProps$
+    // 1. Check DOM Element and immediate parent __reactProps$
     let curr = element;
     let d = 0;
-    while (curr && d < 20) {
+    while (curr && d < 3) {
       try {
         const propKey = Object.keys(curr).find(k => k.startsWith('__reactProps$'));
         if (propKey && curr[propKey]) {
-          const meta = inspectObjectForVideo(curr[propKey], 0);
+          const meta = inspectObjectForVideo(curr[propKey], 0, visited);
           if (meta) return meta;
         }
       } catch (e) {}
@@ -275,26 +285,23 @@
       d++;
     }
 
-    // 2. Direct Fiber Walk: Ascend element and parent component tree via fiber.return
+    // 2. Direct Fiber Walk: Ascend immediate component tree (max 8 fibers)
     let fiberNode = element;
     let fDepth = 0;
-    while (fiberNode && fDepth < 10) {
+    while (fiberNode && fDepth < 3) {
       const fiberKey = Object.keys(fiberNode).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
       if (fiberKey && fiberNode[fiberKey]) {
         let fiber = fiberNode[fiberKey];
         let fCount = 0;
-        while (fiber && fCount < 50) {
+        while (fiber && fCount < 8) {
           if (fiber.memoizedProps) {
-            const meta = inspectObjectForVideo(fiber.memoizedProps, 0);
-            if (meta) return meta;
-          }
-          if (fiber.memoizedState) {
-            const meta = inspectObjectForVideo(fiber.memoizedState, 0);
+            const meta = inspectObjectForVideo(fiber.memoizedProps, 0, visited);
             if (meta) return meta;
           }
           fiber = fiber.return;
           fCount++;
         }
+        break;
       }
       fiberNode = fiberNode.parentElement;
       fDepth++;

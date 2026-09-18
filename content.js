@@ -381,16 +381,12 @@
    * Scrapes visible player timer text from DOM to determine ground-truth duration,
    * bypassing MSE buffered window limitations (e.g. 4.0s).
    */
-  /**
-   * Scrapes visible player timer text from DOM to determine ground-truth duration,
-   * bypassing MSE buffered window limitations (e.g. 4.0s).
-   */
   function extractVideoDurationFromDom(video) {
     if (!video) return 0;
     try {
       const container = video.closest('.feed-shared-update-v2, [data-urn], [data-id], article, .feed-shared-linkedin-video, div[data-id], .occludable-update') || video.parentElement;
       if (!container) return 0;
-      const candidates = container.querySelectorAll('time, span, div, p, [aria-label*="duration"], [class*="duration"], [class*="time"], [aria-label*="time"]');
+      const candidates = container.querySelectorAll('time, [class*="duration"], [class*="time"], [aria-label*="duration"], [aria-label*="time"], [class*="vjs-"]');
       let maxSec = 0;
       for (const el of candidates) {
         let text = (el.textContent || '').trim();
@@ -462,7 +458,15 @@
     return false;
   }
 
+  let cachedEmbeddedMetadata = null;
+  let cachedEmbeddedMetadataTime = 0;
+
   function extractAllEmbeddedVideoMetadata() {
+    const now = Date.now();
+    if (cachedEmbeddedMetadata && (now - cachedEmbeddedMetadataTime) < 3000) {
+      return cachedEmbeddedMetadata;
+    }
+
     const results = [];
     const codeEls = document.querySelectorAll('code[id*="bpr-guid"], script[type="application/json"], script[id*="bpr-guid"], script[data-source="voyager"]');
     for (const el of codeEls) {
@@ -554,6 +558,9 @@
         }
       } catch (e) {}
     }
+
+    cachedEmbeddedMetadata = results;
+    cachedEmbeddedMetadataTime = now;
     return results;
   }
 
@@ -1319,7 +1326,8 @@
     videos.forEach(v => registerVideo(v));
   }
 
-  // MutationObserver with deep shadow DOM checks
+  // MutationObserver with deep shadow DOM checks and debounced scanning
+  let scanDebounceTimer = null;
   const observer = new MutationObserver((mutations) => {
     let shouldScan = false;
     for (const m of mutations) {
@@ -1329,7 +1337,8 @@
       }
     }
     if (shouldScan) {
-      scanForVideos();
+      if (scanDebounceTimer) clearTimeout(scanDebounceTimer);
+      scanDebounceTimer = setTimeout(scanForVideos, 250);
     }
   });
 
