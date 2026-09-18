@@ -1,29 +1,20 @@
-// Garrett - Popup Controller
-const downloadHlsStream = (globalThis.GarrettStreamAssembler && globalThis.GarrettStreamAssembler.downloadStream) || null;
-const getRandomKeeperQuote = (globalThis.GarrettKeeper && globalThis.GarrettKeeper.getRandomKeeperQuote) || (() => ({ quote: "What is merely watched is soon forgotten. What is taken is kept.", source: "Keeper Annuary, Ch. VII" }));
-
+// Garrett — Video Keeper: Popup Controller
 document.addEventListener('DOMContentLoaded', () => {
   const statusBar = document.getElementById('status-bar');
-  const networkSection = document.getElementById('network-section');
-  const networkList = document.getElementById('network-list');
-  const domSection = document.getElementById('dom-section');
-  const domList = document.getElementById('dom-list');
+  const videoList = document.getElementById('video-list');
   const emptyState = document.getElementById('empty-state');
   const refreshBtn = document.getElementById('refresh-btn');
 
   function formatTime(seconds) {
-    if (isNaN(seconds) || !isFinite(seconds)) return '00:00';
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
+    if (isNaN(seconds) || !isFinite(seconds) || seconds <= 0) return '';
+    const totalSecs = Math.floor(seconds);
+    const hours = Math.floor(totalSecs / 3600);
+    const mins = Math.floor((totalSecs % 3600) / 60);
+    const secs = totalSecs % 60;
+    if (hours > 0) {
+      return `${hours}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
     return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-  }
-
-  function formatBytes(bytes) {
-    if (!bytes || bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   }
 
   async function getActiveTab() {
@@ -45,28 +36,25 @@ document.addEventListener('DOMContentLoaded', () => {
           files: ['keeper.js', 'streamAssembler.js', 'garrettQueue.js', 'content.js']
         });
       } catch (err) {
-        console.warn('Could not inject content script:', err);
+        console.warn('[Garrett] Script injection check:', err);
       }
     }
   }
 
   async function loadData() {
-    statusBar.textContent = 'Scanning active tab for media...';
-    networkSection.style.display = 'none';
-    domSection.style.display = 'none';
+    statusBar.innerHTML = '<span>Scanning page for videos...</span>';
     emptyState.style.display = 'none';
-    networkList.innerHTML = '';
-    domList.innerHTML = '';
+    videoList.innerHTML = '';
 
     const tab = await getActiveTab();
     if (!tab || !tab.id) {
-      statusBar.textContent = 'No active tab found.';
+      statusBar.innerHTML = '<span>No active tab found</span>';
       emptyState.style.display = 'block';
       return;
     }
 
-    if (tab.url.startsWith('chrome://') || tab.url.startsWith('brave://') || tab.url.startsWith('about:')) {
-      statusBar.textContent = 'Extensions cannot run on internal browser pages.';
+    if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('brave://') || tab.url.startsWith('about:') || tab.url.startsWith('edge://'))) {
+      statusBar.innerHTML = '<span>Extensions cannot run on internal browser pages</span>';
       emptyState.style.display = 'block';
       return;
     }
@@ -76,276 +64,218 @@ document.addEventListener('DOMContentLoaded', () => {
     let domVideos = [];
     try {
       const tabResp = await chrome.tabs.sendMessage(tab.id, { action: 'scanAndGetVideos' });
-      if (tabResp && tabResp.videos) {
+      if (tabResp && Array.isArray(tabResp.videos)) {
         domVideos = tabResp.videos;
       }
     } catch (e) {}
 
-    // Query background service worker for all detected media on this tab
     chrome.runtime.sendMessage({ action: 'getVideosForTab', tabId: tab.id }, (response) => {
-      const netStreams = (response && response.networkStreams) || [];
       const bgDom = (response && response.domVideos) || [];
-      if (domVideos.length === 0 && bgDom.length > 0) {
-        domVideos = bgDom;
+      const netStreams = (response && response.networkStreams) || [];
+
+      // Consolidate DOM video items
+      let videos = domVideos.length > 0 ? domVideos : bgDom;
+
+      // If no DOM videos detected yet, check for network streams (standalone media)
+      if (videos.length === 0 && netStreams.length > 0) {
+        videos = netStreams.map((ns, idx) => ({
+          id: ns.streamKey || `stream_${idx}`,
+          src: ns.url || ns.blobUrl || '',
+          duration: ns.duration || 0,
+          width: ns.width || 0,
+          height: ns.height || 0,
+          muted: false,
+          format: ns.format || (ns.isHls ? 'HLS' : 'DASH'),
+          streamUrl: ns.manifestUrl || ns.url || ns.blobUrl || '',
+          entityKey: ns.entityKey || ns.streamKey,
+          isNetworkFallback: true
+        }));
       }
 
-      const totalCount = domVideos.length + netStreams.length;
-
-      if (totalCount === 0) {
-        statusBar.textContent = '0 videos detected yet.';
+      if (videos.length === 0) {
+        statusBar.innerHTML = '<span>0 videos detected</span>';
         emptyState.style.display = 'block';
-      } else {
-        statusBar.textContent = `Found ${totalCount} media source${totalCount > 1 ? 's' : ''}:`;
-        emptyState.style.display = 'none';
-
-        if (netStreams && netStreams.length > 0) {
-          renderNetworkStreams(netStreams);
-        }
-        if (domVideos && domVideos.length > 0) {
-          renderDomVideos(domVideos, tab.id);
-        }
+        return;
       }
+
+      statusBar.innerHTML = `<span>${videos.length} video${videos.length > 1 ? 's' : ''} detected</span>`;
+      emptyState.style.display = 'none';
+
+      videos.forEach((vid, idx) => {
+        const matchedStream = netStreams.find(s =>
+          (vid.entityKey && (s.entityKey === vid.entityKey || s.streamKey === vid.entityKey)) ||
+          (vid.src && (s.blobUrl === vid.src || s.url === vid.src))
+        );
+        renderVideoCard(vid, idx, matchedStream, tab.id);
+      });
     });
   }
 
-  function renderNetworkStreams(streams) {
-    networkSection.style.display = 'block';
-    networkList.innerHTML = '';
+  function renderVideoCard(video, index, matchedStream, tabId) {
+    const card = document.createElement('div');
+    card.className = 'video-card';
 
-    streams.forEach((stream, index) => {
-      const card = document.createElement('div');
-      card.className = 'stream-card';
+    const durationText = formatTime(video.duration);
+    const resText = (video.width && video.height) ? `${video.width}x${video.height}` : '';
+    const audioText = video.muted ? 'Audio: No' : 'Audio: Yes';
 
-      const displayUrl = stream.blobUrl || stream.url || stream.streamKey || '';
-      const shortUrl = displayUrl.length > 45 ? displayUrl.substring(0, 45) + '...' : displayUrl;
-      const isStream = stream.isStream ?? stream.isHls ?? true;
-      const formatLabel = stream.format || (stream.isHls ? 'HLS' : 'DASH');
-      const playlistUrls = stream.playlistUrls || (stream.segments ? stream.segments.map(s => s.url) : []);
-      const segCount = stream.segmentCount || playlistUrls.length;
+    const streamFormat = video.format ||
+      (matchedStream ? (matchedStream.format || (matchedStream.isHls ? 'HLS' : 'DASH')) : (video.isBlob ? 'DASH' : 'MP4'));
+    const streamUrl = (matchedStream && (matchedStream.manifestUrl || matchedStream.url || matchedStream.blobUrl)) ||
+      video.streamUrl || video.src || '';
+    const streamKey = video.entityKey || (matchedStream && (matchedStream.entityKey || matchedStream.streamKey)) || '';
 
-      card.innerHTML = `
-        <div class="stream-card-header">
-          <span class="stream-title">Stream #${index + 1} (${formatLabel})</span>
-          <span class="card-badge ${stream.manifestUrl ? 'badge-blob' : 'badge-mp4'}">${stream.manifestUrl ? 'Manifest Ready' : 'Segment Queue'}</span>
-        </div>
-        <div class="video-meta">
-          <div style="grid-column: span 3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-            Index: <span>${shortUrl}</span>
+    // Build meta chips
+    const metaParts = [];
+    if (durationText) metaParts.push(`<span class="meta-item">${durationText}</span>`);
+    if (resText) metaParts.push(`<span class="meta-item">${resText}</span>`);
+    metaParts.push(`<span class="meta-item">${audioText}</span>`);
+
+    card.innerHTML = `
+      <div class="video-card-top">
+        <div class="video-info">
+          <div class="video-title-row">
+            <span class="video-title">Video ${index + 1}</span>
           </div>
-          ${segCount > 0 ? `<div>Queued: <span>${segCount} segments</span></div>` : ''}
-          ${stream.duration ? `<div>Duration: <span>${formatTime(stream.duration)}</span></div>` : ''}
+          <div class="video-meta-inline">
+            ${metaParts.join('<span class="meta-dot">·</span>')}
+          </div>
         </div>
-        <div class="stream-actions">
-          ${isStream ? `
-            <button class="btn btn-hls hls-dl-btn">
-              ⚡ Fast Download Full Video (${formatLabel})
-            </button>
-          ` : `
-            <button class="btn btn-primary stream-dl-btn">
-              ⚡ Download Video File (MP4)
-            </button>
-          `}
-        </div>
-      `;
-
-      // Direct MP4 Download
-      const directBtn = card.querySelector('.stream-dl-btn');
-      if (directBtn) {
-        directBtn.addEventListener('click', () => {
-          chrome.runtime.sendMessage({
-            action: 'downloadUrl',
-            url: stream.url,
-            filename: `video_${Date.now()}.mp4`
-          });
-          window.close();
-        });
-      }
-
-      // Fast HLS/DASH Segment Assembler Download
-      const hlsBtn = card.querySelector('.hls-dl-btn');
-      if (hlsBtn) {
-        hlsBtn.addEventListener('click', async () => {
-          const actionContainer = card.querySelector('.stream-actions');
-          actionContainer.innerHTML = `
-            <div class="hls-progress-container">
-              <div class="hls-progress-header">
-                <span>Downloading chunks in parallel...</span>
-                <b class="hls-pct">0%</b>
-              </div>
-              <div class="hls-progress-track">
-                <div class="hls-progress-fill"></div>
-              </div>
-            </div>
-          `;
-
-          const pctEl = actionContainer.querySelector('.hls-pct');
-          const fillEl = actionContainer.querySelector('.hls-progress-fill');
-
-          try {
-            const customFetchText = async (u) => {
-              try {
-                const r = await fetch(u);
-                if (r.ok) return await r.text();
-                throw new Error(`HTTP ${r.status}`);
-              } catch (e) {
-                const bg = await chrome.runtime.sendMessage({ action: 'fetchText', url: u });
-                if (bg && bg.success && bg.text) return bg.text;
-                throw e;
-              }
-            };
-
-            const customFetchBuffer = async (u) => {
-              try {
-                const r = await fetch(u);
-                if (r.ok) return await r.arrayBuffer();
-                throw new Error(`HTTP ${r.status}`);
-              } catch (e) {
-                const bg = await chrome.runtime.sendMessage({ action: 'fetchBuffer', url: u });
-                if (bg && bg.success && bg.data) {
-                  const bin = atob(bg.data);
-                  const buf = new Uint8Array(bin.length);
-                  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-                  return buf.buffer;
-                }
-                throw e;
-              }
-            };
-
-            let result;
-            const assembler = globalThis.GarrettStreamAssembler;
-            const manifestUrl = stream.manifestUrl || stream.url;
-
-            if (manifestUrl && (manifestUrl.includes('.mpd') || manifestUrl.includes('/dash/') || manifestUrl.includes('.m3u8'))) {
-              result = await assembler.downloadStream(manifestUrl, (completed, total) => {
-                const percent = Math.round((completed / total) * 100);
-                pctEl.textContent = `${percent}% (${completed}/${total})`;
-                fillEl.style.width = `${percent}%`;
-              }, { manifestText: stream.manifestXml, customFetchText, customFetchBuffer });
-            } else if (playlistUrls && playlistUrls.length > 0) {
-              result = await assembler.assembleSegments(playlistUrls, 'video/mp4', 'mp4', (completed, total) => {
-                const percent = Math.round((completed / total) * 100);
-                pctEl.textContent = `${percent}% (${completed}/${total})`;
-                fillEl.style.width = `${percent}%`;
-              }, customFetchBuffer);
-            } else {
-              throw new Error('Stream manifest not yet cached. Play the video for a second to cache the playlist.');
-            }
-
-            actionContainer.innerHTML = `
-              <div style="color: #34d399; font-size: 11px; font-weight: 600; text-align: center; padding: 4px;">
-                🎉 Assembled ${formatBytes(result.totalBytes)}! Saving file...
-              </div>
-            `;
-
-            // Trigger download via object URL in popup DOM
-            const url = URL.createObjectURL(result.blob);
-            const a = document.createElement('a');
-            a.style.display = 'none';
-            a.href = url;
-            a.download = `stream_${Date.now()}.${result.ext}`;
-            document.body.appendChild(a);
-            a.click();
-            setTimeout(() => {
-              a.remove();
-              URL.revokeObjectURL(url);
-            }, 30000);
-
-          } catch (err) {
-            console.error('HLS download error:', err);
-            actionContainer.innerHTML = `
-              <div style="color: #f87171; font-size: 10px; padding: 4px;">
-                ⚠️ HLS assembly error: ${err.message}
-              </div>
-            `;
-          }
-        });
-      }
-
-      networkList.appendChild(card);
-    });
-  }
-
-  function renderDomVideos(videos, tabId) {
-    domSection.style.display = 'block';
-    domList.innerHTML = '';
-
-    videos.forEach((video, index) => {
-      const card = document.createElement('div');
-      card.className = 'video-card';
-
-      const typeLabel = video.isBlob
-        ? (video.isDirectBlob ? 'Direct File Blob' : 'MediaSource Stream')
-        : (video.src ? 'Direct URL' : 'Embedded Player');
-      const badgeClass = video.isBlob ? 'badge-blob' : 'badge-mp4';
-      const res = (video.width && video.height) ? `${video.width}x${video.height}` : 'Auto';
-      const dur = formatTime(video.duration);
-
-      card.innerHTML = `
-        <div class="video-card-header">
-          <span class="video-title">Video Player #${index + 1}</span>
-          <span class="card-badge ${badgeClass}">${typeLabel}</span>
-        </div>
-        <div class="video-meta">
-          <div>Res: <span>${res}</span></div>
-          <div>Duration: <span>${dur}</span></div>
-          <div>Muted: <span>${video.muted ? 'Yes 🔇' : 'No 🔊'}</span></div>
-        </div>
-        <div class="card-actions">
-          ${(!video.isBlob || video.isDirectBlob) && video.src ? `
-            <button class="btn btn-primary direct-btn" data-id="${video.id}" data-frame="${video.frameId || 0}">
-              ⚡ Direct Download (MP4)
-            </button>
-          ` : ''}
-
-          <button class="btn btn-hls harvest-btn" data-id="${video.id}" data-frame="${video.frameId || 0}">
-            🗝️ Keep Video (Full Stream)
+        <div class="video-actions">
+          <button class="action-icon-btn inspect-btn" title="Inspect stream details">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+          </button>
+          <button class="action-icon-btn download-btn" title="Download video">
+            <svg class="dl-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
           </button>
         </div>
+      </div>
+
+      <div class="stream-details-drawer" style="display: none;">
+        <div class="drawer-field">
+          <span class="drawer-label">Format</span>
+          <span class="drawer-val drawer-badge">${streamFormat}</span>
+        </div>
+        <div class="drawer-field">
+          <span class="drawer-label">Stream URL</span>
+          <div class="drawer-url-box">
+            <span class="drawer-val drawer-url" title="${streamUrl}">${streamUrl || 'Pending stream lock...'}</span>
+            ${streamUrl ? `
+              <button class="copy-url-btn" title="Copy URL">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                </svg>
+              </button>
+            ` : ''}
+          </div>
+        </div>
+        ${streamKey ? `
+        <div class="drawer-field">
+          <span class="drawer-label">URN / Key</span>
+          <span class="drawer-val drawer-key">${streamKey}</span>
+        </div>` : ''}
+      </div>
+    `;
+
+    // Toggle drawer on inspect button click
+    const inspectBtn = card.querySelector('.inspect-btn');
+    const drawer = card.querySelector('.stream-details-drawer');
+    inspectBtn.addEventListener('click', () => {
+      const isOpen = drawer.style.display !== 'none';
+      drawer.style.display = isOpen ? 'none' : 'flex';
+      inspectBtn.classList.toggle('active', !isOpen);
+    });
+
+    // Copy URL button
+    const copyBtn = card.querySelector('.copy-url-btn');
+    if (copyBtn && streamUrl) {
+      copyBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(streamUrl);
+        copyBtn.innerHTML = `
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+        `;
+        setTimeout(() => {
+          copyBtn.innerHTML = `
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+          `;
+        }, 1500);
+      });
+    }
+
+    // Download action
+    const dlBtn = card.querySelector('.download-btn');
+    dlBtn.addEventListener('click', async () => {
+      dlBtn.disabled = true;
+      dlBtn.classList.add('loading');
+      dlBtn.innerHTML = `
+        <svg class="spinning" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="2" x2="12" y2="6"/>
+          <line x1="12" y1="18" x2="12" y2="22"/>
+          <line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/>
+          <line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/>
+          <line x1="2" y1="12" x2="6" y2="12"/>
+          <line x1="18" y1="12" x2="22" y2="12"/>
+          <line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/>
+          <line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/>
+        </svg>
       `;
 
-      const directBtn = card.querySelector('.direct-btn');
-      if (directBtn) {
-        directBtn.addEventListener('click', () => {
-          chrome.tabs.sendMessage(tabId, {
-            action: 'directDownload',
-            videoId: video.id
-          }, { frameId: video.frameId || 0 });
-          window.close();
+      if (video.isNetworkFallback && video.streamUrl) {
+        chrome.runtime.sendMessage({
+          action: 'downloadUrl',
+          url: video.streamUrl,
+          filename: `video_${Date.now()}.mp4`
         });
-      }
-
-      const harvestBtn = card.querySelector('.harvest-btn');
-      if (harvestBtn) {
-        harvestBtn.addEventListener('click', () => {
-          chrome.tabs.sendMessage(tabId, {
+        dlBtn.innerHTML = `
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+        `;
+        setTimeout(() => { dlBtn.disabled = false; }, 3000);
+      } else {
+        try {
+          await chrome.tabs.sendMessage(tabId, {
             action: 'harvestVideo',
             videoId: video.id
           }, { frameId: video.frameId || 0 });
-          window.close();
-        });
+
+          dlBtn.innerHTML = `
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+          `;
+          setTimeout(() => { dlBtn.disabled = false; }, 3000);
+        } catch (err) {
+          console.error('[Garrett] Download error:', err);
+          dlBtn.disabled = false;
+          dlBtn.classList.remove('loading');
+          dlBtn.innerHTML = `
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+          `;
+        }
       }
-
-      domList.appendChild(card);
     });
-  }
 
-  // Keeper Lore Quote Cycling
-  const keeperBox = document.getElementById('keeper-box');
-  const quoteEl = document.getElementById('k-quote');
-  const sourceEl = document.getElementById('k-source');
-
-  function updateKeeperQuote() {
-    if (quoteEl && sourceEl) {
-      const q = getRandomKeeperQuote();
-      quoteEl.textContent = `"${q.quote}"`;
-      sourceEl.textContent = `— ${q.source}`;
-    }
+    videoList.appendChild(card);
   }
-
-  if (keeperBox) {
-    keeperBox.addEventListener('click', updateKeeperQuote);
-  }
-  updateKeeperQuote();
 
   refreshBtn.addEventListener('click', loadData);
   loadData();

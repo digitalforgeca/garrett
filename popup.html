@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Garrett — Stream Keeper</title>
+  <title>Garrett — Video Keeper</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
@@ -12,76 +12,49 @@
     <header class="header">
       <div class="header-brand">
         <div class="header-logo">
-          <img src="icons/icon48.png" style="width: 24px; height: 24px;" alt="Garrett">
+          <img src="icons/icon48.png" style="width: 22px; height: 22px; border-radius: 4px;" alt="Garrett">
         </div>
         <div>
           <h1 class="header-title">Garrett</h1>
-          <p class="header-subtitle">The Master Stream Keeper</p>
+          <p class="header-subtitle">Video Keeper</p>
         </div>
       </div>
       <button id="refresh-btn" class="icon-button" title="Rescan Tab">
-        <svg viewBox="0 0 24 24">
-          <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10"/>
+          <polyline points="1 20 1 14 7 14"/>
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
         </svg>
       </button>
     </header>
 
-    <!-- Content -->
+    <!-- Main Content -->
     <main class="content">
       <div id="status-bar" class="status-bar">
-        Scanning active tab for media...
+        <span>Scanning page for videos...</span>
       </div>
 
-      <!-- Sniffed Network Streams (MP4s / Playlists) -->
-      <div id="network-section" style="display: none;">
-        <div class="section-title">
-          <span>⚡ Direct Video Streams</span>
-          <span class="badge badge-instant">Instant Save</span>
-        </div>
-        <div id="network-list" class="stream-list"></div>
-      </div>
-
-      <!-- DOM Video Elements -->
-      <div id="dom-section" style="display: none;">
-        <div class="section-title">
-          <span>🎬 Page Video Players</span>
-          <span class="badge badge-player">Stream Capture</span>
-        </div>
-        <div id="dom-list" class="video-list"></div>
+      <!-- Videos List -->
+      <div id="video-section">
+        <div id="video-list" class="video-list"></div>
       </div>
 
       <!-- Empty State -->
       <div id="empty-state" class="empty-state" style="display: none;">
-        <div class="empty-icon">🗝️</div>
-        <h3>No Media Detected in the Shadows</h3>
-        <p>Start playing the video on the page and click <b>Rescan</b>.</p>
-      </div>
-
-      <!-- Keeper Wisdom -->
-      <div class="keeper-card" id="keeper-box" title="Click to uncover another Keeper teaching">
-        <div class="keeper-icon">🗝️</div>
-        <div class="keeper-body">
-          <p class="keeper-text" id="k-quote">"What is merely watched is soon forgotten. What is taken is kept."</p>
-          <span class="keeper-source" id="k-source">— Keeper Annuary, Ch. VII</span>
+        <div class="empty-icon">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="23 7 16 12 23 17 23 7"/>
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+          </svg>
         </div>
+        <h3>No videos detected</h3>
+        <p>Play a video on the page and click rescan.</p>
       </div>
     </main>
-
-    <!-- Footer Guide -->
-    <footer class="footer">
-      <details class="help-details">
-        <summary>ℹ️ Why can't I just save the "blob:" URL?</summary>
-        <div class="help-content">
-          <p><b>The "blob:" is not a file:</b> On platforms like LinkedIn, Twitter, and YouTube, <code>blob:https://...</code> is an ephemeral in-memory pipeline. Garrett intercepts the stream manifest and assembles all pristine media fragments directly into a single MP4 file with full audio.</p>
-          <p><b>How to keep it:</b> Click <b>🗝️ Keep Video</b> directly on the player or use <b>⚡ Fast Download</b> above to preserve the entire stream in seconds.</p>
-        </div>
-      </details>
-    </footer>
   </div>
 
   <script src="streamAssembler.js"></script>
   <script src="garrettQueue.js"></script>
-  <script src="keeper.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
