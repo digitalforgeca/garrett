@@ -206,8 +206,9 @@
       if (resA !== resB) return resB - resA;
       return (b.bitRate || 0) - (a.bitRate || 0);
     });
-    const best = sorted[0];
-    const loc = best?.streamingLocations?.[0]?.url || best?.url;
+    const loc = best?.streamingLocations?.[0]?.url ||
+                (typeof best?.streamingLocations?.[0] === 'string' ? best.streamingLocations[0] : null) ||
+                best?.url;
     return loc ? { url: loc, width: best.width, height: best.height, bitRate: best.bitRate } : null;
   }
 

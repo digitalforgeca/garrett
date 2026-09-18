@@ -377,6 +377,50 @@
     return false;
   }
 
+  /**
+   * Scrapes visible player timer text from DOM to determine ground-truth duration,
+   * bypassing MSE buffered window limitations (e.g. 4.0s).
+   */
+  function extractVideoDurationFromDom(video) {
+    if (!video) return 0;
+    try {
+      const container = video.closest('.feed-shared-update-v2, [data-urn], [data-id], article, .feed-shared-linkedin-video, div[data-id], .occludable-update') || video.parentElement;
+      if (!container) return 0;
+      const candidates = container.querySelectorAll('time, span, div, p, [aria-label*="duration"], [class*="duration"], [class*="time"]');
+      for (const el of candidates) {
+        const text = (el.textContent || '').trim();
+        if (text.length > 12) continue;
+        const m = text.match(/\b(?:(\d+):)?(\d+):(\d{2})\b/);
+        if (m) {
+          const hours = m[1] ? parseInt(m[1], 10) : 0;
+          const mins = parseInt(m[2], 10);
+          const secs = parseInt(m[3], 10);
+          const total = hours * 3600 + mins * 60 + secs;
+          if (total > 3) return total;
+        }
+      }
+    } catch (e) {}
+    return 0;
+  }
+
+  /**
+   * Resolves true presentation duration across DOM UI, embedded metadata, and video tag.
+   */
+  function resolveRealVideoDuration(state) {
+    const domDur = state && state.video ? extractVideoDurationFromDom(state.video) : 0;
+    if (domDur > 5) {
+      if (state && (!state.duration || state.duration <= 5)) state.duration = domDur;
+      return domDur;
+    }
+    if (state && state.duration && state.duration > 5 && isFinite(state.duration)) {
+      return state.duration;
+    }
+    if (state && state.video && typeof state.video.duration === 'number' && isFinite(state.video.duration) && state.video.duration > 5) {
+      return state.video.duration;
+    }
+    return (state ? state.duration : 0) || domDur || (state && state.video && isFinite(state.video.duration) ? state.video.duration : 0) || 0;
+  }
+
   function matchesVideoMetadata(videoState, meta) {
     if (!meta) return false;
     if (videoRegistry.size === 1) return true;
@@ -400,8 +444,8 @@
       }
     }
 
-    const vidDur = videoState.video ? (videoState.video.duration || 0) : (videoState.duration || 0);
-    if (vidDur > 3 && meta.duration > 3 && Math.abs(vidDur - meta.duration) <= 2.5) {
+    const realDur = resolveRealVideoDuration(videoState);
+    if (realDur > 3 && meta.duration > 3 && Math.abs(realDur - meta.duration) <= 2.5) {
       return true;
     }
 
@@ -410,7 +454,7 @@
 
   function extractAllEmbeddedVideoMetadata() {
     const results = [];
-    const codeEls = document.querySelectorAll('code[id^="bpr-guid-"]');
+    const codeEls = document.querySelectorAll('code[id*="bpr-guid"], script[type="application/json"], script[id*="bpr-guid"], script[data-source="voyager"]');
     for (const el of codeEls) {
       const text = el.textContent || '';
       if (!text.includes('videoPlayMetadata') && !text.includes('progressiveStreams') && !text.includes('adaptiveStreams')) {
@@ -477,7 +521,9 @@
               if (resA !== resB) return resB - resA;
               return (b.bitRate || 0) - (a.bitRate || 0);
             });
-            bestProgUrl = sorted[0]?.streamingLocations?.[0]?.url || sorted[0]?.url || null;
+            bestProgUrl = sorted[0]?.streamingLocations?.[0]?.url ||
+                          (typeof sorted[0]?.streamingLocations?.[0] === 'string' ? sorted[0].streamingLocations[0] : null) ||
+                          sorted[0]?.url || null;
           }
           const dashUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'DASH' || s.url?.includes('dash') || s.url?.includes('.mpd'))?.url || null;
           const hlsUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'HLS' || s.url?.includes('m3u8'))?.url || null;
@@ -533,6 +579,7 @@
           if (m.progressiveUrl) state.progressiveUrl = m.progressiveUrl;
           if (m.manifestUrl) state.manifestUrl = m.manifestUrl;
           if (m.mediaKey) state.mediaKey = m.mediaKey;
+          if (m.duration && m.duration > 0) state.duration = m.duration;
           if (m.mediaKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
             state.entityKey = m.mediaKey;
           }
@@ -551,6 +598,10 @@
       if (info.mediaKey && !state.mediaKey) state.mediaKey = info.mediaKey;
       if (info.allKeys) {
         for (const k of info.allKeys) state.allKeys.add(k);
+      }
+      const dDur = extractVideoDurationFromDom(video);
+      if (dDur > 5 && (!state.duration || state.duration <= 5)) {
+        state.duration = dDur;
       }
       const src = video.currentSrc || video.src || '';
       if (src.startsWith('blob:')) {
@@ -572,9 +623,10 @@
 
   function notifyBackground(state) {
     const v = state.video;
-    const src = v.currentSrc || v.src || '';
+    const src = v ? (v.currentSrc || v.src || '') : '';
     const entityKey = state.entityKey || extractVideoEntityKeyFromDom(v);
     state.entityKey = entityKey;
+    const realDur = resolveRealVideoDuration(state);
 
     safeSendMessage({
       action: 'registerVideo',
@@ -584,9 +636,9 @@
         entityKey: entityKey,
         isBlob: src.startsWith('blob:'),
         poster: state.poster,
-        duration: v.duration || 0,
-        width: v.videoWidth || 0,
-        height: v.videoHeight || 0
+        duration: realDur,
+        width: v ? (v.videoWidth || 0) : 0,
+        height: v ? (v.videoHeight || 0) : 0
       }
     });
 
@@ -597,9 +649,9 @@
           blobUrl: src,
           videoId: state.id,
           entityKey: entityKey,
-          duration: v.duration || 0,
-          width: v.videoWidth || 0,
-          height: v.videoHeight || 0,
+          duration: realDur,
+          width: v ? (v.videoWidth || 0) : 0,
+          height: v ? (v.videoHeight || 0) : 0,
           poster: state.poster
         }
       });
@@ -668,6 +720,9 @@
     // Fast Path 1: Check React Stream Cache
     if (reactStreamCache.has(currentSrc)) {
       const rMeta = reactStreamCache.get(currentSrc);
+      if (rMeta.duration && rMeta.duration > 0 && (!state.duration || state.duration <= 5)) {
+        state.duration = rMeta.duration;
+      }
       if (rMeta.progressiveUrl) {
         state.progressiveUrl = rMeta.progressiveUrl;
         return {
@@ -682,7 +737,7 @@
       }
     }
 
-    // Fast Path 2: Check Embedded DOM JSON (<code id^="bpr-guid-">)
+    // Fast Path 2: Check Embedded DOM JSON (<code id*="bpr-guid">)
     try {
       const allMeta = extractAllEmbeddedVideoMetadata();
       for (const m of allMeta) {
@@ -692,6 +747,9 @@
           if (m.mediaKey) state.mediaKey = m.mediaKey;
           if (m.mediaKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
             state.entityKey = m.mediaKey;
+          }
+          if (m.duration && m.duration > 0) {
+            state.duration = m.duration;
           }
           if (m.progressiveUrl) {
             state.progressiveUrl = m.progressiveUrl;
@@ -709,6 +767,7 @@
       }
     } catch (e) {}
 
+    const duration = resolveRealVideoDuration(state);
     const videoInfo = {
       id: state.id,
       src: currentSrc,
@@ -781,7 +840,7 @@
                 streamKey: state.entityKey
               };
             }
-            if (!state.manifestUrl && (name.includes('/dash/') || name.includes('.mpd') || name.includes('.m3u8') || (name.includes('/playlist/vid/') && name.includes('manifest')))) {
+            if (!state.manifestUrl && (name.includes('.mpd') || name.includes('.m3u8') || (name.includes('/playlist/vid/') && name.includes('manifest'))) && !name.includes('.m4s') && !name.includes('.ts')) {
               if (queue) queue.registerManifest(name);
               state.manifestUrl = name;
             }
@@ -961,10 +1020,10 @@
         safeSendMessage({ action: 'streamProgress', videoId: state.id, completed, total, pct });
       };
 
-      const vidDur = state.video ? (state.video.duration || 0) : (state.duration || 0);
+      const realDur = resolveRealVideoDuration(state);
       const result = await assembler.downloadStream(streamUrl, onProgress, {
         manifestText,
-        duration: vidDur,
+        duration: realDur,
         customFetchText,
         customFetchBuffer
       });
@@ -1176,7 +1235,7 @@
       // Path 4: Complete Segment Queue from playback
       const segs = candidateSegs;
       if (segs && segs.length > 0) {
-        const vidDuration = state.video ? (state.video.duration || 0) : (state.duration || 0);
+        const vidDuration = resolveRealVideoDuration(state);
         // Each segment is typically 2-4 seconds. If video duration is known (>10s),
         // ensure we have enough segments to cover at least 85% of the full video.
         // Never save partial 1-2 segment cuts (under 3 segments)!
@@ -1209,7 +1268,7 @@
               }, 4000);
               return;
             }
-            if (name.includes('/dash/') || name.includes('.mpd') || name.includes('.m3u8')) {
+            if ((name.includes('.mpd') || name.includes('.m3u8') || name.includes('playlist.mpd') || name.includes('manifest')) && !name.includes('.m4s') && !name.includes('.ts')) {
               try {
                 await downloadStreamInPage(state, name);
                 return;

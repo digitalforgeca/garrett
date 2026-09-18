@@ -152,10 +152,10 @@
     // 1. Extract total duration from MPD or Period, or options.duration fallback
     const mpdDurMatch = xmlText.match(/\bmediaPresentationDuration=["']([^"']+)["']/i);
     const periodDurMatch = xmlText.match(/<Period\b[^>]*\bduration=["']([^"']+)["']/i);
-    const totalDurationSeconds =
-      (mpdDurMatch ? parseIsoDuration(mpdDurMatch[1]) : 0) ||
-      (periodDurMatch ? parseIsoDuration(periodDurMatch[1]) : 0) ||
-      (options && typeof options.duration === 'number' && options.duration > 0 ? options.duration : 0);
+    const mpdDur = (mpdDurMatch ? parseIsoDuration(mpdDurMatch[1]) : 0) ||
+                   (periodDurMatch ? parseIsoDuration(periodDurMatch[1]) : 0);
+    const optDur = (options && typeof options.duration === 'number' && options.duration > 0 && isFinite(options.duration)) ? options.duration : 0;
+    const totalDurationSeconds = Math.max(mpdDur, optDur);
 
     // 2. Parse each AdaptationSet block
     const adaptRegex = /<AdaptationSet\b([^>]*)>([\s\S]*?)<\/AdaptationSet>/gi;
@@ -271,13 +271,14 @@
             }
 
             // Extrapolate to full presentation duration if manifest timeline only provided initial chunks
-            if (totalDurationSeconds > 0 && timescaleVal > 0 && lastD > 0) {
+            if (totalDurationSeconds > 0 && timescaleVal > 0) {
               const maxTime = totalDurationSeconds * timescaleVal;
+              const stepD = lastD > 0 ? lastD : (2 * timescaleVal);
               while (currentTime < maxTime) {
                 const segRaw = expandTemplate(mediaTpl, id, bandwidth, currentNum, currentTime);
                 segments.push(resolveUrl(segRaw, baseUrl));
                 currentNum++;
-                currentTime += lastD;
+                currentTime += stepD;
               }
             }
           } else if (durationVal > 0 && mediaTpl && totalDurationSeconds > 0) {
