@@ -425,7 +425,33 @@
     };
     if (!video) return info;
 
-    // 1. Check direct poster attribute on video (ignoring user avatars & company logos)
+    // 1. Find player wrapper and post container
+    const playerWrapper = video.closest('.feed-shared-linkedin-video, .video-js, [class*="player"]') || video.parentElement;
+    const postContainer = video.closest('.feed-shared-update-v2, .occludable-update, [data-urn*="activity"], [data-urn*="ugcPost"], [data-entity-urn], article') || playerWrapper;
+
+    // 1b. Check data-sources attribute on video or player wrapper (used by LinkedIn web player)
+    const dsVal = video.getAttribute('data-sources') || (playerWrapper && playerWrapper.getAttribute('data-sources'));
+    if (dsVal) {
+      try {
+        const parsedSources = JSON.parse(dsVal);
+        if (Array.isArray(parsedSources)) {
+          for (const s of parsedSources) {
+            const u = s.src || s.url;
+            if (u && typeof u === 'string' && isGenuineProgressiveMp4Url(u)) {
+              info.progressiveUrl = u;
+              const k = extractStreamKey(u);
+              if (k) {
+                if (!info.mediaKey) info.mediaKey = k;
+                info.allKeys.add(k);
+              }
+              break;
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
+    // 2. Check direct poster attribute on video (ignoring user avatars & company logos)
     const poster = video.getAttribute('poster') || video.poster || '';
     if (poster) {
       const cleanPoster = poster.split('?')[0].toLowerCase();
@@ -437,10 +463,6 @@
         }
       }
     }
-
-    // 2. Find player wrapper and post container
-    const playerWrapper = video.closest('.feed-shared-linkedin-video, .video-js, [class*="player"]') || video.parentElement;
-    const postContainer = video.closest('.feed-shared-update-v2, .occludable-update, [data-urn*="activity"], [data-urn*="ugcPost"], [data-entity-urn], article') || playerWrapper;
 
     // 3. Search thumbnail / preview elements ONLY inside the player wrapper (NEVER in outer post container which contains avatars)
     if (playerWrapper) {
@@ -784,25 +806,25 @@
             const u = extractMediaUrlFromItem(s);
             if (!u) continue;
             const proto = String(s.protocol || '').toUpperCase();
-            if (proto === 'DASH' || u.includes('/dash/') || u.includes('.mpd')) {
-              if (!dashUrl) dashUrl = u;
-            } else if (proto === 'HLS' || u.includes('.m3u8') || u.includes('/hls/')) {
+            if (proto === 'HLS' || u.includes('.m3u8') || u.includes('/hls/')) {
               if (!hlsUrl) hlsUrl = u;
+            } else if (proto === 'DASH' || u.includes('/dash/') || u.includes('.mpd')) {
+              if (!dashUrl) dashUrl = u;
             }
             if (!mediaKey) mediaKey = extractStreamKey(u);
           }
 
           const dur = vpm.duration ? (vpm.duration > 1000 ? vpm.duration / 1000 : vpm.duration) : 0;
 
-          if (bestProgUrl || dashUrl || hlsUrl) {
+          if (bestProgUrl || hlsUrl || dashUrl) {
             results.push({
               entityUrn: mediaKey ? `urn:li:digitalmediaAsset:${mediaKey}` : (activityUrn ? `urn:li:activity:${activityUrn}` : ''),
               mediaKey: mediaKey || null,
               activityUrn: activityUrn || null,
               progressiveUrl: bestProgUrl,
-              manifestUrl: dashUrl || hlsUrl,
-              dashUrl,
+              manifestUrl: hlsUrl || dashUrl,
               hlsUrl,
+              dashUrl,
               duration: dur
             });
           }
@@ -1133,7 +1155,16 @@
     if (domInfo.primaryKey) state.entityKey = domInfo.primaryKey;
     const entityKey = state.mediaKey || state.entityKey;
     state.entityKey = entityKey;
-    const duration = resolveRealVideoDuration(state);
+    // Fast Path -1: Direct progressive URL discovered from DOM data-sources attribute
+    if (domInfo.progressiveUrl && isGenuineProgressiveMp4Url(domInfo.progressiveUrl)) {
+      state.progressiveUrl = domInfo.progressiveUrl;
+      return {
+        progressiveUrl: domInfo.progressiveUrl,
+        isStream: false,
+        format: 'DIRECT',
+        streamKey: state.mediaKey || entityKey
+      };
+    }
 
     // Fast Path 0: Already cached progressive MP4 URL (validate it matches this video's mediaKey)
     if (state.progressiveUrl) {
@@ -1277,9 +1308,13 @@
                 streamKey: state.mediaKey || state.entityKey
               };
             }
-            const isDashOrHls = (name.includes('.mpd') || name.includes('/dash/') || name.includes('.m3u8') || (name.includes('/playlist/vid/') && name.includes('manifest'))) &&
+            const isHls = (name.includes('.m3u8') || name.includes('/hls/')) && !name.includes('.m4s') && !name.includes('.ts');
+            const isDash = (name.includes('.mpd') || name.includes('/dash/') || (name.includes('/playlist/vid/') && name.includes('manifest'))) &&
               !name.includes('.m4s') && !name.includes('.ts') && !name.includes('.init') && !name.includes('/init') && !/\/[0-9]+\/[0-9]+(?:\?|$)/.test(name);
-            if (!state.manifestUrl && isDashOrHls) {
+            if (isHls) {
+              if (queue) queue.registerManifest(name);
+              state.manifestUrl = name;
+            } else if (!state.manifestUrl && isDash) {
               if (queue) queue.registerManifest(name);
               state.manifestUrl = name;
             }
@@ -1532,6 +1567,46 @@
       if (state.progressiveUrl && isGenuineProgressiveMp4Url(state.progressiveUrl)) {
         state.isDownloading = false;
         return await keepVideoNow(state);
+      }
+
+      // Priority 0.5: If an authentic manifest exists, assemble full manifest stream instead of partial segments
+      let resolvedManifest = state.manifestUrl;
+      let resolvedXml = state.manifestXml || '';
+
+      if (!resolvedManifest && state.mediaKey) {
+        for (const mf of discoveredManifestCache) {
+          if (entityKeysMatch(state.mediaKey, mf.streamKey)) {
+            resolvedManifest = mf.url;
+            resolvedXml = mf.text;
+            state.manifestUrl = mf.url;
+            state.manifestXml = mf.text;
+            break;
+          }
+        }
+      }
+
+      if (!resolvedManifest) {
+        try {
+          const resEntries = performance.getEntriesByType('resource');
+          for (let i = resEntries.length - 1; i >= 0; i--) {
+            const name = resEntries[i].name;
+            if (isNonMediaUrl(name)) continue;
+            const isHls = (name.includes('.m3u8') || name.includes('/hls/')) && !name.includes('.m4s') && !name.includes('.ts');
+            if (isHls) {
+              const nameKey = extractStreamKey(name);
+              if (nameKey && ((state.mediaKey && entityKeysMatch(state.mediaKey, nameKey)) || (state.entityKey && entityKeysMatch(state.entityKey, nameKey)))) {
+                resolvedManifest = name;
+                state.manifestUrl = name;
+                break;
+              }
+            }
+          }
+        } catch (e) {}
+      }
+
+      if (resolvedManifest) {
+        state.isDownloading = false;
+        return await downloadStreamInPage(state, resolvedManifest, resolvedXml);
       }
 
       // Collect all candidate URLs from arguments, state.allSegments, and performance resource entries
@@ -1853,9 +1928,10 @@
           for (let i = resEntries.length - 1; i >= 0; i--) {
             const name = resEntries[i].name;
             if (isNonMediaUrl(name)) continue;
-            const isDashOrHls = (name.includes('.mpd') || name.includes('/dash/') || name.includes('.m3u8') || (name.includes('/playlist/vid/') && name.includes('manifest'))) &&
+            const isHls = (name.includes('.m3u8') || name.includes('/hls/')) && !name.includes('.m4s') && !name.includes('.ts');
+            const isDash = (name.includes('.mpd') || name.includes('/dash/') || (name.includes('/playlist/vid/') && name.includes('manifest'))) &&
               !name.includes('.m4s') && !name.includes('.ts') && !name.includes('.init') && !name.includes('/init') && !/\/[0-9]+\/[0-9]+(?:\?|$)/.test(name);
-            if (isDashOrHls) {
+            if (isHls || isDash) {
               const isClaimedByOther = Array.from(videoRegistry.values()).some(other => other !== state && (other.progressiveUrl === name || other.manifestUrl === name));
               if (isClaimedByOther) continue;
 
@@ -1864,7 +1940,7 @@
                 manifestUrl = name;
                 state.manifestUrl = name;
                 if (queue) queue.registerManifest(name);
-                break;
+                if (isHls) break;
               }
             }
           }

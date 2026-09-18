@@ -165,7 +165,7 @@
       }
     }
 
-    const manifestUrl = dashUrl || hlsUrl || (typeof vpm.manifestUrl === 'string' ? vpm.manifestUrl : null);
+    const manifestUrl = hlsUrl || dashUrl || (typeof vpm.manifestUrl === 'string' ? vpm.manifestUrl : null);
     const progUrl = bestProg ? bestProg.url : (typeof vpm.progressiveUrl === 'string' && isGenuineProgressiveMp4Url(vpm.progressiveUrl) ? vpm.progressiveUrl : null);
     const rawDur = vpm.duration || vpm.durationMs || vpm.durationInSeconds || metaObj.duration || metaObj.durationMs || 0;
     const dur = rawDur ? (rawDur > 1000 ? rawDur / 1000 : rawDur) : null;

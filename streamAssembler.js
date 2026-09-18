@@ -55,8 +55,14 @@
           const width = resMatch ? parseInt(resMatch[1], 10) : 0;
           const height = resMatch ? parseInt(resMatch[2], 10) : 0;
 
-          const uriLine = lines[i + 1];
-          if (uriLine && !uriLine.startsWith('#')) {
+          let uriLine = null;
+          for (let j = i + 1; j < lines.length; j++) {
+            if (!lines[j].startsWith('#')) {
+              uriLine = lines[j];
+              break;
+            }
+          }
+          if (uriLine) {
             const uri = resolveUrl(uriLine, baseUrl);
             const isAvc = (codecs.includes('avc') || codecs.includes('h264')) && !codecs.includes('av01');
             const hasAudio = codecs.includes('mp4a') || codecs.includes('aac');
@@ -280,26 +286,31 @@
             // (e.g. at least 60 additional segments). assembleSegments will safely download segments in order
             // and gracefully conclude when the trailing 404 is encountered.
             const stepD = lastD > 0 ? lastD : (2 * timescaleVal);
-            let targetMaxTime = (totalDurationSeconds > 5 && timescaleVal > 0) ? (totalDurationSeconds * timescaleVal) : 0;
-            const minExtrapolateSegments = 60;
-            const targetCount = Math.max(
-              targetMaxTime > 0 ? (Math.ceil(targetMaxTime / stepD) + 3) : 0,
-              segments.length + minExtrapolateSegments,
-              75
-            );
-            const safeMaxSegments = Math.min(targetCount, 400);
-
-            while (segments.length < safeMaxSegments) {
-              const segRaw = expandTemplate(mediaTpl, id, bandwidth, currentNum, currentTime);
-              segments.push(resolveUrl(segRaw, baseUrl));
-              currentNum++;
-              currentTime += stepD;
+            if (totalDurationSeconds > 5 && timescaleVal > 0) {
+              const targetMaxTime = totalDurationSeconds * timescaleVal;
+              const expectedCount = Math.ceil(targetMaxTime / stepD);
+              while (segments.length < expectedCount && segments.length < 400) {
+                const segRaw = expandTemplate(mediaTpl, id, bandwidth, currentNum, currentTime);
+                segments.push(resolveUrl(segRaw, baseUrl));
+                currentNum++;
+                currentTime += stepD;
+              }
+            } else if (segments.length < 75) {
+              const targetCount = Math.min(Math.max(segments.length + 50, 75), 350);
+              while (segments.length < targetCount) {
+                const segRaw = expandTemplate(mediaTpl, id, bandwidth, currentNum, currentTime);
+                segments.push(resolveUrl(segRaw, baseUrl));
+                currentNum++;
+                currentTime += stepD;
+              }
             }
           } else if (durationVal > 0 && mediaTpl) {
             // Case B: Static duration on <SegmentTemplate>
             const segDuration = timescaleVal > 0 ? (durationVal / timescaleVal) : 2.0;
             const targetSec = totalDurationSeconds > 0 ? totalDurationSeconds : 180;
-            const segCount = Math.min(Math.ceil(targetSec / segDuration) + 5, 350);
+            const segCount = totalDurationSeconds > 0
+              ? Math.ceil(targetSec / segDuration)
+              : Math.min(Math.ceil(targetSec / segDuration), 350);
             let currentTime = 0;
             let currentNum = startNum;
 
@@ -391,24 +402,15 @@
       return r.arrayBuffer();
     });
 
-    const text = options.manifestText || await fetchText(manifestUrl);
-
-    // 1. DASH Manifest (.mpd or /dash/)
-    if (text.includes('<MPD') || manifestUrl.includes('/dash/') || manifestUrl.includes('.mpd')) {
-      const reps = parseDashMpd(text, manifestUrl, options);
-      if (!reps || reps.length === 0) {
-        throw new Error('No valid video representations found in DASH manifest.');
-      }
-      const best = reps[0];
-      const allUrls = [];
-      if (best.initUrl) allUrls.push(best.initUrl);
-      allUrls.push(...best.segments);
-      const result = await assembleSegments(allUrls, 'video/mp4', 'mp4', onProgress, fetchBuffer, { allowTrailingLoss: true });
-      return { ...result, representation: best };
+    let text = options.manifestText;
+    const isHlsUrl = manifestUrl.includes('.m3u8') || manifestUrl.includes('/hls/');
+    const isDashUrl = manifestUrl.includes('.mpd') || manifestUrl.includes('/dash/');
+    if (!text || (isHlsUrl && text.includes('<MPD')) || (isDashUrl && text.includes('#EXTM3U'))) {
+      text = await fetchText(manifestUrl);
     }
 
-    // 2. HLS Playlist (.m3u8)
-    if (text.includes('#EXTM3U') || manifestUrl.includes('.m3u8')) {
+    // 1. HLS Playlist (.m3u8 or #EXTM3U) - Prioritized for complete presentation duration & muxed audio
+    if (isHlsUrl || text.includes('#EXTM3U')) {
       let parsed = parseM3U8(text, manifestUrl);
 
       if (parsed.type === 'master' && parsed.nextUrl) {
@@ -432,6 +434,20 @@
 
       const result = await assembleSegments(allUrls, mime, ext, onProgress, fetchBuffer, { allowTrailingLoss: true });
       return { ...result, playlist: parsed };
+    }
+
+    // 2. DASH Manifest (.mpd or /dash/)
+    if (text.includes('<MPD') || isDashUrl) {
+      const reps = parseDashMpd(text, manifestUrl, options);
+      if (!reps || reps.length === 0) {
+        throw new Error('No valid video representations found in DASH manifest.');
+      }
+      const best = reps[0];
+      const allUrls = [];
+      if (best.initUrl) allUrls.push(best.initUrl);
+      allUrls.push(...best.segments);
+      const result = await assembleSegments(allUrls, 'video/mp4', 'mp4', onProgress, fetchBuffer, { allowTrailingLoss: true });
+      return { ...result, representation: best };
     }
 
     throw new Error('Unrecognized stream manifest format (not DASH or HLS).');
