@@ -122,7 +122,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const streamFormat = video.format ||
       (matchedStream ? (matchedStream.format || (matchedStream.isHls ? 'HLS' : 'DASH')) : (video.isBlob ? 'DASH' : 'MP4'));
-    const streamUrl = (matchedStream && (matchedStream.manifestUrl || matchedStream.url || matchedStream.blobUrl)) ||
+    const streamUrl = (matchedStream && (matchedStream.progressiveUrl || matchedStream.manifestUrl || matchedStream.url || matchedStream.blobUrl)) ||
       video.streamUrl || video.src || '';
     const streamKey = video.entityKey || (matchedStream && (matchedStream.entityKey || matchedStream.streamKey)) || '';
 
@@ -309,6 +309,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const resp = await chrome.tabs.sendMessage(tabId, {
           action: 'keepVideo',
           videoId: video.id,
+          progressiveUrl: video.hasProgressive ? video.streamUrl : (matchedStream?.progressiveUrl || null),
           streamUrl: streamUrl,
           manifestXml: matchedStream?.manifestXml
         }, { frameId: video.frameId || 0 });

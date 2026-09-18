@@ -476,18 +476,6 @@
       };
     }
 
-    // Fast Path 0.5: Already cached manifest URL
-    if (state.manifestUrl) {
-      return {
-        url: state.manifestUrl,
-        manifestXml: state.manifestXml || '',
-        isStream: true,
-        format: state.manifestUrl.includes('.m3u8') ? 'HLS' : 'DASH',
-        streamKey: entityKey,
-        allSegments: []
-      };
-    }
-
     // Fast Path 1: Check React Stream Cache
     if (reactStreamCache.has(currentSrc)) {
       const rMeta = reactStreamCache.get(currentSrc);
@@ -502,19 +490,13 @@
       }
       if (rMeta.manifestUrl) {
         state.manifestUrl = rMeta.manifestUrl;
-        return {
-          url: rMeta.manifestUrl,
-          isStream: true,
-          format: rMeta.manifestUrl.includes('.m3u8') ? 'HLS' : 'DASH',
-          streamKey: rMeta.entityUrn || entityKey,
-          allSegments: []
-        };
       }
     }
 
     // Fast Path 2: Check Embedded DOM JSON (<code id^="bpr-guid-">)
     try {
       const allMeta = extractAllEmbeddedVideoMetadata();
+      // First pass: look specifically for any progressive MP4 URL
       for (const m of allMeta) {
         const keyMatch = entityKey && m.entityUrn && entityKeysMatch(entityKey, m.entityUrn);
         const durMatch = duration > 5 && m.duration > 5 && Math.abs(duration - m.duration) <= 1.5;
@@ -529,15 +511,8 @@
               streamKey: m.entityUrn || entityKey
             };
           }
-          if (m.manifestUrl) {
+          if (m.manifestUrl && !state.manifestUrl) {
             state.manifestUrl = m.manifestUrl;
-            return {
-              url: m.manifestUrl,
-              isStream: true,
-              format: m.manifestUrl.includes('.m3u8') ? 'HLS' : 'DASH',
-              streamKey: m.entityUrn || entityKey,
-              allSegments: []
-            };
           }
         }
       }
@@ -573,15 +548,8 @@
             streamKey: rMeta.entityUrn || entityKey
           };
         }
-        if (rMeta.manifestUrl) {
+        if (rMeta.manifestUrl && !state.manifestUrl) {
           state.manifestUrl = rMeta.manifestUrl;
-          return {
-            url: rMeta.manifestUrl,
-            isStream: true,
-            format: rMeta.manifestUrl.includes('.m3u8') ? 'HLS' : 'DASH',
-            streamKey: rMeta.entityUrn || entityKey,
-            allSegments: []
-          };
         }
       }
 
@@ -603,16 +571,9 @@
                 streamKey: entityKey
               };
             }
-            if (name.includes('/dash/') || name.includes('.mpd') || name.includes('.m3u8') || (name.includes('/playlist/vid/') && name.includes('manifest'))) {
+            if (!state.manifestUrl && (name.includes('/dash/') || name.includes('.mpd') || name.includes('.m3u8') || (name.includes('/playlist/vid/') && name.includes('manifest')))) {
               if (queue) queue.registerManifest(name);
               state.manifestUrl = name;
-              return {
-                url: name,
-                isStream: true,
-                format: name.includes('.m3u8') ? 'HLS' : 'DASH',
-                streamKey: entityKey,
-                allSegments: []
-              };
             }
           }
         }
@@ -636,14 +597,8 @@
                 streamKey: pl.entityKey || entityKey
               };
             }
-            if (pl.manifestUrl) {
-              return {
-                url: pl.manifestUrl,
-                isStream: true,
-                format: pl.format,
-                streamKey: pl.entityKey || entityKey,
-                allSegments: pl.playlistUrls || []
-              };
+            if (pl.manifestUrl && !state.manifestUrl) {
+              state.manifestUrl = pl.manifestUrl;
             }
           }
         } catch (e) {}
@@ -662,16 +617,8 @@
               streamKey: localMatch.entityKey || entityKey
             };
           }
-          if (localMatch.manifestUrl) {
-            return {
-              url: localMatch.manifestUrl,
-              manifestXml: localMatch.manifestXml,
-              isStream: true,
-              format: localMatch.format || 'DASH',
-              streamKey: localMatch.streamKey || entityKey,
-              allSegments: localMatch.getAllSegmentUrls ? localMatch.getAllSegmentUrls() : (localMatch.allSegments || []),
-              entry: localMatch
-            };
+          if (localMatch.manifestUrl && !state.manifestUrl) {
+            state.manifestUrl = localMatch.manifestUrl;
           }
         }
       }
@@ -693,20 +640,25 @@
               streamKey: s.streamKey || entityKey
             };
           }
-          if (s.manifestUrl) {
-            return {
-              url: s.manifestUrl,
-              isStream: s.isStream,
-              format: s.format || 'DASH',
-              streamKey: s.streamKey || entityKey,
-              allSegments: (s.segments || []).map(seg => seg.url),
-              entry: s
-            };
+          if (s.manifestUrl && !state.manifestUrl) {
+            state.manifestUrl = s.manifestUrl;
           }
         }
       } catch (e) {}
 
       await new Promise(r => setTimeout(r, 200));
+    }
+
+    // If progressive discovery timed out, fall back to cached manifest
+    if (state.manifestUrl) {
+      return {
+        url: state.manifestUrl,
+        manifestXml: state.manifestXml || '',
+        isStream: true,
+        format: state.manifestUrl.includes('.m3u8') ? 'HLS' : 'DASH',
+        streamKey: entityKey,
+        allSegments: []
+      };
     }
 
     return null;
@@ -786,9 +738,7 @@
       }
     } catch (err) {
       console.error('[Garrett] Stream download error:', err);
-      showToast(`Stream download error: ${err.message}`, 5000);
-      safeSendMessage({ action: 'streamError', videoId: state.id, error: err.message });
-      if (textEl) textEl.textContent = 'Keep Video';
+      throw err;
     } finally {
       state.isDownloading = false;
     }
@@ -874,12 +824,6 @@
     }
 
     try {
-      // 0. Fast Path: If manifestUrl is already known or attached, keep immediately
-      if (state.manifestUrl) {
-        await downloadStreamInPage(state, state.manifestUrl, state.manifestXml || '');
-        return;
-      }
-
       // 1. Resolve stream via Garrett Multi-Tier Discovery
       const stream = await resolveStreamForVideo(state, 2500);
 
@@ -931,8 +875,12 @@
 
       // Path 2: Full Manifest Stream (DASH or HLS assembled)
       if (stream && stream.url) {
-        await downloadStreamInPage(state, stream.url, stream.manifestXml || '');
-        return;
+        try {
+          await downloadStreamInPage(state, stream.url, stream.manifestXml || '');
+          return;
+        } catch (streamErr) {
+          console.warn('[Garrett] Manifest download failed (e.g. 403), falling back to segments:', streamErr.message);
+        }
       }
 
       // Path 3: Direct standalone MP4/WebM URL on video tag
@@ -1113,11 +1061,14 @@
         };
       }
       if (state) {
+        if (request.progressiveUrl) {
+          state.progressiveUrl = request.progressiveUrl;
+        }
         if (request.streamUrl) {
-          if (request.streamUrl.includes('.mpd') || request.streamUrl.includes('/dash/') || request.streamUrl.includes('.m3u8')) {
-            state.manifestUrl = request.streamUrl;
-          } else if (request.streamUrl.endsWith('.mp4') || request.streamUrl.includes('/mp4-')) {
+          if (request.streamUrl.endsWith('.mp4') || request.streamUrl.includes('/mp4-') || request.streamUrl.includes('mp4_')) {
             state.progressiveUrl = request.streamUrl;
+          } else if (!state.progressiveUrl && (request.streamUrl.includes('.mpd') || request.streamUrl.includes('/dash/') || request.streamUrl.includes('.m3u8'))) {
+            state.manifestUrl = request.streamUrl;
           }
         }
         if (request.manifestXml) {
@@ -1158,7 +1109,11 @@
       const state = Array.from(videoRegistry.values()).find(s => s.id === request.videoId) ||
                     Array.from(videoRegistry.values())[0];
       if (state) {
-        downloadStreamInPage(state, request.url);
+        downloadStreamInPage(state, request.url).catch(e => {
+          console.error('[Garrett] startKeepStream error:', e);
+          showToast(`Stream download error: ${e.message}`, 5000);
+          safeSendMessage({ action: 'streamError', videoId: state.id, error: e.message });
+        });
       }
       sendResponse({ success: true });
       return true;
