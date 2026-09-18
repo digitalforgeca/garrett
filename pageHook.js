@@ -180,7 +180,7 @@
         if (m1) allKeys.add(m1[1]);
         const m2 = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
         if (m2) allKeys.add(m2[1]);
-        const m3 = val.match(/([CD][A-Za-z0-9_-]{8,})/);
+        const m3 = val.match(/([CD][A-Za-z0-9_-]{14,})/);
         if (m3) allKeys.add(m3[1]);
       };
 
@@ -188,11 +188,17 @@
       checkUrn(vpm.mediaUrn);
       checkUrn(metaObj.entityUrn);
       checkUrn(metaObj.mediaUrn);
-      checkUrn(metaObj.urn);
-      checkUrn(metaObj['$id']);
 
-      const mediaKey = (vpm.mediaUrn || vpm.entityUrn || metaObj.mediaUrn || metaObj.entityUrn || '')
-        .replace(/^urn:li:[^:]+:/i, '').trim();
+      let mediaKey = null;
+      for (const k of [vpm.mediaUrn, vpm.entityUrn, metaObj.mediaUrn, metaObj.entityUrn]) {
+        if (!k || typeof k !== 'string') continue;
+        const m = k.match(/(?:digitalmediaAsset|fs_video|video|dms):([A-Za-z0-9_-]{8,})/i) ||
+                  k.match(/^([CD][A-Za-z0-9_-]{14,})$/);
+        if (m) { mediaKey = m[1]; break; }
+      }
+      if (!mediaKey && progUrl) {
+        mediaKey = extractStreamKey(progUrl);
+      }
 
       return {
         progressiveUrl: progUrl,
@@ -213,25 +219,35 @@
     const results = [];
     const collected = [];
 
-    function scan(node, depth = 0) {
-      if (!node || depth > 8 || typeof node !== 'object') return;
+    function scan(node, depth = 0, currentActivityUrn = null) {
+      if (!node || depth > 10 || typeof node !== 'object') return;
+      let actUrn = currentActivityUrn;
+      const checkAct = (val) => {
+        if (!val || typeof val !== 'string') return null;
+        const m = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
+        return m ? m[1] : null;
+      };
+      if (!actUrn) {
+        actUrn = checkAct(node.urn) || checkAct(node.entityUrn) || checkAct(node['$id']);
+      }
+
       if (node.videoPlayMetadata && typeof node.videoPlayMetadata === 'object') {
-        collected.push({ parent: node, vpm: node.videoPlayMetadata });
+        collected.push({ parent: node, vpm: node.videoPlayMetadata, activityUrn: actUrn });
       }
       if (Array.isArray(node.progressiveStreams) || Array.isArray(node.adaptiveStreams)) {
-        collected.push({ parent: node, vpm: node });
+        collected.push({ parent: node, vpm: node, activityUrn: actUrn });
       }
       if (node['$type'] && typeof node['$type'] === 'string' && node['$type'].includes('VideoPlayMetadata')) {
-        collected.push({ parent: node, vpm: node });
+        collected.push({ parent: node, vpm: node, activityUrn: actUrn });
       }
       if (Array.isArray(node)) {
-        for (let i = 0; i < node.length && i < 80; i++) scan(node[i], depth + 1);
+        for (let i = 0; i < node.length && i < 100; i++) scan(node[i], depth + 1, actUrn);
       } else {
         const keys = Object.keys(node);
-        for (let i = 0; i < keys.length && i < 50; i++) {
+        for (let i = 0; i < keys.length && i < 60; i++) {
           const k = keys[i];
           if (k === 'videoPlayMetadata') continue;
-          scan(node[k], depth + 1);
+          scan(node[k], depth + 1, actUrn);
         }
       }
     }
@@ -243,31 +259,34 @@
       const parent = item.parent || {};
       const parsed = parseVideoMetadata(vpm);
       if (parsed) {
-        const allKeys = new Set();
-        const checkUrn = (val) => {
-          if (!val || typeof val !== 'string') return;
-          allKeys.add(val);
-          const m1 = val.match(/(?:digitalmediaAsset|fs_video|video|dms):([A-Za-z0-9_-]{8,})/i);
-          if (m1) allKeys.add(m1[1]);
-          const m2 = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
-          if (m2) allKeys.add(m2[1]);
+        const checkMedia = (val) => {
+          if (!val || typeof val !== 'string') return null;
+          const m = val.match(/(?:digitalmediaAsset|fs_video|video|dms):([A-Za-z0-9_-]{8,})/i) ||
+                    val.match(/^([CD][A-Za-z0-9_-]{14,})$/);
+          return m ? m[1] : null;
         };
+        const mediaKey = parsed.mediaKey ||
+                         checkMedia(vpm.mediaUrn) ||
+                         checkMedia(vpm.entityUrn) ||
+                         checkMedia(parent.mediaUrn) ||
+                         checkMedia(parent.entityUrn) ||
+                         (parsed.progressiveUrl ? extractStreamKey(parsed.progressiveUrl) : null);
 
-        checkUrn(vpm.entityUrn);
-        checkUrn(vpm.mediaUrn);
-        checkUrn(parent.entityUrn);
-        checkUrn(parent.urn);
-        checkUrn(parent['$id']);
-        for (const [k, v] of Object.entries(parent)) {
-          if (typeof v === 'string' && (v.includes('urn:li:') || v.length > 10)) {
-            checkUrn(v);
-          }
+        let activityUrn = item.activityUrn;
+        if (!activityUrn) {
+          const checkAct = (val) => {
+            if (!val || typeof val !== 'string') return null;
+            const m = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
+            return m ? m[1] : null;
+          };
+          activityUrn = checkAct(parent.urn) || checkAct(parent.entityUrn) || checkAct(parent['$id']);
         }
 
         results.push({
           ...parsed,
-          allKeys: Array.from(allKeys),
-          entityUrn: parsed.entityUrn || vpm.entityUrn || parent.entityUrn || parent.urn || null
+          mediaKey: mediaKey || null,
+          activityUrn: activityUrn || null,
+          entityUrn: mediaKey ? `urn:li:digitalmediaAsset:${mediaKey}` : (activityUrn ? `urn:li:activity:${activityUrn}` : null)
         });
       }
     }

@@ -141,6 +141,36 @@
     }
   };
 
+  function cleanEntityKey(key) {
+    if (!key) return '';
+    return String(key).replace(/^urn:li:[^:]+:/i, '').trim();
+  }
+
+  function entityKeysMatch(key1, key2) {
+    if (!key1 || !key2) return false;
+    const k1 = cleanEntityKey(key1);
+    const k2 = cleanEntityKey(key2);
+    if (!k1 || !k2) return false;
+    if (k1 === k2) return true;
+
+    const isNum1 = /^\d+$/.test(k1);
+    const isNum2 = /^\d+$/.test(k2);
+    if (isNum1 && isNum2) return k1 === k2;
+    if (isNum1 !== isNum2) return false;
+
+    if (k1.length === k2.length && k1.length >= 14) {
+      if (k1.slice(1) === k2.slice(1)) return true;
+    }
+    return false;
+  }
+
+  function streamUrlMatchesKey(url, key) {
+    if (!url || !key) return false;
+    const streamKey = extractStreamKey(url);
+    if (!streamKey) return false;
+    return entityKeysMatch(streamKey, key);
+  }
+
   // Listen for telemetry events from pageHook.js (MAIN world)
   window.addEventListener('__GARRETT_MANIFEST_CONTENT__', (e) => {
     if (e.detail && e.detail.url && !isNonMediaUrl(e.detail.url)) {
@@ -154,24 +184,17 @@
       });
 
       const streamKey = extractStreamKey(e.detail.url);
-      for (const state of videoRegistry.values()) {
-        const v = state.video;
-        const keyMatch = (state.entityKey && entityKeysMatch(state.entityKey, e.detail.url)) ||
-                         (state.allKeys && Array.from(state.allKeys).some(k => entityKeysMatch(k, e.detail.url)));
-        const fallbackMatch = !keyMatch && (
-          (videoRegistry.size === 1) ||
-          (v && !v.paused && !state.manifestUrl)
-        );
+      if (!streamKey) return;
 
-        if (keyMatch || fallbackMatch) {
-          if (!state.manifestUrl || keyMatch) {
-            state.manifestUrl = e.detail.url;
-            state.manifestXml = e.detail.text || '';
-            if (streamKey && !state.mediaKey) state.mediaKey = streamKey;
-            if (streamKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
-              state.entityKey = streamKey;
-            }
-          }
+      for (const state of videoRegistry.values()) {
+        if (!state.video || !state.video.isConnected) continue;
+        const keyMatch = (state.mediaKey && entityKeysMatch(state.mediaKey, streamKey)) ||
+                         (state.allSegments && state.allSegments.some(s => streamUrlMatchesKey(s, streamKey)));
+
+        if (keyMatch) {
+          state.manifestUrl = e.detail.url;
+          state.manifestXml = e.detail.text || '';
+          if (!state.mediaKey) state.mediaKey = streamKey;
         }
       }
     }
@@ -188,22 +211,21 @@
       });
 
       const streamKey = extractStreamKey(e.detail.url);
+      if (!streamKey) return;
+
       for (const state of videoRegistry.values()) {
+        if (!state.video || !state.video.isConnected) continue;
         const v = state.video;
-        const hasKeys = !!(state.entityKey || (state.allKeys && state.allKeys.size > 0));
-        const matchesState = (state.entityKey && entityKeysMatch(state.entityKey, e.detail.url)) ||
-                             (state.allKeys && Array.from(state.allKeys).some(k => entityKeysMatch(k, e.detail.url))) ||
-                             (!hasKeys && videoRegistry.size === 1) ||
-                             (!hasKeys && v && !v.paused);
+        const activePlaying = Array.from(videoRegistry.values()).filter(s => s.video && !s.video.paused);
+        const matchesState = (state.mediaKey && entityKeysMatch(state.mediaKey, streamKey)) ||
+                             (state.allSegments && state.allSegments.some(s => streamUrlMatchesKey(s, streamKey))) ||
+                             (!state.mediaKey && v && !v.paused && activePlaying.length === 1);
         if (matchesState) {
           if (!state.allSegments) state.allSegments = [];
           if (!state.allSegments.includes(e.detail.url)) {
             state.allSegments.push(e.detail.url);
           }
-          if (streamKey && !state.mediaKey) state.mediaKey = streamKey;
-          if (streamKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
-            state.entityKey = streamKey;
-          }
+          if (!state.mediaKey) state.mediaKey = streamKey;
         }
       }
     }
@@ -230,11 +252,9 @@
 
       for (const state of videoRegistry.values()) {
         const v = state.video;
-        if (!v) continue;
+        if (!v || !v.isConnected) continue;
         const vSrc = v.currentSrc || v.src || '';
-        const matches = targetBlobUrl
-          ? (vSrc === targetBlobUrl)
-          : (videoRegistry.size === 1 || !v.paused);
+        const matches = targetBlobUrl ? (vSrc === targetBlobUrl) : (!v.paused);
 
         if (matches) {
           if (isInit) {
@@ -259,14 +279,8 @@
       if (discoveredMetadataCache.length > 60) discoveredMetadataCache.shift();
 
       for (const state of videoRegistry.values()) {
-        const hasKeys = !!(state.entityKey || (state.allKeys && state.allKeys.size > 0));
-        const matches = (meta.entityUrn && state.entityKey && entityKeysMatch(state.entityKey, meta.entityUrn)) ||
-                        (meta.mediaKey && state.mediaKey && entityKeysMatch(state.mediaKey, meta.mediaKey)) ||
-                        (meta.allKeys && state.entityKey && meta.allKeys.some(k => entityKeysMatch(state.entityKey, k))) ||
-                        (state.allKeys && meta.entityUrn && Array.from(state.allKeys).some(k => entityKeysMatch(k, meta.entityUrn))) ||
-                        (!hasKeys && videoRegistry.size === 1);
-
-        if (matches) {
+        if (!state.video || !state.video.isConnected) continue;
+        if (matchesVideoMetadata(state, meta)) {
           if (meta.progressiveUrl && !state.progressiveUrl) {
             state.progressiveUrl = meta.progressiveUrl;
           }
@@ -276,8 +290,11 @@
           if (meta.duration && meta.duration > 0 && (!state.duration || state.duration <= 5)) {
             state.duration = meta.duration;
           }
-          if (meta.entityUrn && !state.entityKey) {
-            state.entityKey = meta.entityUrn;
+          if (meta.mediaKey && !state.mediaKey) {
+            state.mediaKey = meta.mediaKey;
+          }
+          if (meta.activityUrn && !state.activityUrn) {
+            state.activityUrn = meta.activityUrn;
           }
         }
       }
@@ -291,19 +308,14 @@
 
       for (const state of videoRegistry.values()) {
         const v = state.video;
+        if (!v || !v.isConnected) continue;
         const matchesVideo = (e.detail.videoId && state.id === e.detail.videoId) ||
-                             (v && e.detail.blobUrl && (v.currentSrc === e.detail.blobUrl || v.src === e.detail.blobUrl)) ||
-                             (videoRegistry.size === 1);
+                             (e.detail.blobUrl && (v.currentSrc === e.detail.blobUrl || v.src === e.detail.blobUrl));
         if (matchesVideo) {
           if (e.detail.progressiveUrl) state.progressiveUrl = e.detail.progressiveUrl;
           if (e.detail.manifestUrl) state.manifestUrl = e.detail.manifestUrl;
-          if (e.detail.entityUrn && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
-            state.entityKey = e.detail.entityUrn;
-          }
           if (e.detail.mediaKey && !state.mediaKey) state.mediaKey = e.detail.mediaKey;
-          if (e.detail.allKeys && state.allKeys) {
-            for (const k of e.detail.allKeys) state.allKeys.add(k);
-          }
+          if (e.detail.activityUrn && !state.activityUrn) state.activityUrn = e.detail.activityUrn;
           if (e.detail.duration && (!state.duration || state.duration <= 5)) {
             state.duration = e.detail.duration;
           }
@@ -320,19 +332,16 @@
       const progUrl = e.detail.url;
       if (!isGenuineProgressiveMp4Url(progUrl)) return;
       const streamKey = extractStreamKey(progUrl);
+      if (!streamKey) return;
+
       for (const state of videoRegistry.values()) {
         const v = state.video;
-        const hasKeys = !!(state.entityKey || (state.allKeys && state.allKeys.size > 0));
-        const matchesState = (state.entityKey && entityKeysMatch(state.entityKey, progUrl)) ||
-                             (state.allKeys && Array.from(state.allKeys).some(k => entityKeysMatch(k, progUrl))) ||
-                             (!hasKeys && videoRegistry.size === 1) ||
-                             (!hasKeys && v && !v.paused);
+        if (!v || !v.isConnected) continue;
+        const matchesState = (state.mediaKey && entityKeysMatch(state.mediaKey, streamKey)) ||
+                             (state.allSegments && state.allSegments.some(s => streamUrlMatchesKey(s, streamKey)));
         if (matchesState) {
           state.progressiveUrl = progUrl;
-          if (streamKey && !state.mediaKey) state.mediaKey = streamKey;
-          if (streamKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
-            state.entityKey = streamKey;
-          }
+          if (!state.mediaKey) state.mediaKey = streamKey;
         }
       }
     }
@@ -411,77 +420,65 @@
     };
     if (!video) return info;
 
-    // 1. Check direct poster attribute on video
+    // 1. Check direct poster attribute on video (ignoring user avatars & company logos)
     const poster = video.getAttribute('poster') || video.poster || '';
     if (poster) {
-      const pm = poster.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i);
-      if (pm) {
-        info.mediaKey = pm[1];
-        info.allKeys.add(pm[1]);
-      }
-    }
-
-    // 2. Find closest post container (never stop at inner Ember divs)
-    const playerWrapper = video.closest('.feed-shared-linkedin-video, .video-js, [class*="player"]') || video.parentElement;
-    const postContainer = video.closest('.feed-shared-update-v2, .occludable-update, [data-urn*="activity"], [data-urn*="ugcPost"], [data-entity-urn], article') || playerWrapper;
-    const container = postContainer || playerWrapper;
-    if (!container) {
-      info.primaryKey = info.mediaKey;
-      return info;
-    }
-
-    // 3. Search thumbnail / preview divs inside this specific container
-    const thumbElements = container.querySelectorAll('[style*="videocover"], [style*="dms/image"], [style*="background"], img');
-    for (const el of thumbElements) {
-      const src = el.src || el.getAttribute('src') || el.getAttribute('style') || '';
-      const m = src.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i);
-      if (m) {
-        if (!info.mediaKey) info.mediaKey = m[1];
-        info.allKeys.add(m[1]);
-      }
-    }
-
-    // 4. Directly read data-entity-urn and data-urn attributes in container and ancestors
-    const searchRoots = [postContainer, playerWrapper, video.parentElement].filter(Boolean);
-    const urnElements = [];
-    for (const r of searchRoots) {
-      urnElements.push(r);
-      const children = r.querySelectorAll('[data-urn], [data-entity-urn], [data-chameleon-urn], [data-activity-urn]');
-      for (const c of children) urnElements.push(c);
-    }
-    
-    for (const el of urnElements) {
-      for (const attrName of ['data-entity-urn', 'data-urn', 'data-chameleon-urn', 'data-activity-urn']) {
-        const val = el.getAttribute ? el.getAttribute(attrName) : '';
-        if (!val || typeof val !== 'string') continue;
-
-        info.allKeys.add(val);
-
-        // Clean LinkedIn URN format: urn:li:<type>:<id>
-        if (val.startsWith('urn:li:')) {
-          const parts = val.split(':');
-          const type = parts[2] ? parts[2].toLowerCase() : '';
-          const id = parts.slice(3).join(':');
-          if (id) {
-            info.allKeys.add(id);
-            if (/^(digitalmediaasset|fs_video|video|dms|media)$/i.test(type)) {
-              if (!info.mediaKey) info.mediaKey = id;
-            } else if (/^(activity|ugcpost|share)$/i.test(type)) {
-              if (!info.activityUrn) info.activityUrn = id;
-            }
-          }
+      const cleanPoster = poster.split('?')[0].toLowerCase();
+      if (!cleanPoster.includes('profile-displayphoto') && !cleanPoster.includes('company-logo') && !cleanPoster.includes('feedshare-shrink')) {
+        const pm = poster.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i);
+        if (pm) {
+          info.mediaKey = pm[1];
+          info.allKeys.add(pm[1]);
         }
       }
     }
 
-    // 5. Scoped innerHTML search for media URL patterns if not yet found
-    if (!info.mediaKey) {
-      const html = container.innerHTML || '';
-      const hm = html.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i);
-      if (hm) {
-        info.mediaKey = hm[1];
-        info.allKeys.add(hm[1]);
+    // 2. Find player wrapper and post container
+    const playerWrapper = video.closest('.feed-shared-linkedin-video, .video-js, [class*="player"]') || video.parentElement;
+    const postContainer = video.closest('.feed-shared-update-v2, .occludable-update, [data-urn*="activity"], [data-urn*="ugcPost"], [data-entity-urn], article') || playerWrapper;
+
+    // 3. Search thumbnail / preview elements ONLY inside the player wrapper (NEVER in outer post container which contains avatars)
+    if (playerWrapper) {
+      const thumbElements = playerWrapper.querySelectorAll('[style*="videocover"], [style*="dms/image"], img');
+      for (const el of thumbElements) {
+        const src = el.src || el.getAttribute('src') || el.getAttribute('style') || '';
+        const cleanSrc = src.split('?')[0].toLowerCase();
+        if (cleanSrc.includes('profile-displayphoto') || cleanSrc.includes('company-logo') || cleanSrc.includes('feedshare-shrink')) {
+          continue;
+        }
+        const m = src.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i);
+        if (m) {
+          if (!info.mediaKey) info.mediaKey = m[1];
+          info.allKeys.add(m[1]);
+          break;
+        }
       }
+    }
+
+    // 4. Extract post-level activity/ugcPost URN from postContainer and playerWrapper
+    const searchRoots = [postContainer, playerWrapper].filter(Boolean);
+    for (const r of searchRoots) {
+      const els = [r, ...r.querySelectorAll('[data-urn*="activity"], [data-urn*="ugcPost"], [data-entity-urn*="activity"], [data-entity-urn*="ugcPost"]')];
+      for (const el of els) {
+        for (const attr of ['data-urn', 'data-entity-urn', 'data-activity-urn']) {
+          const val = el.getAttribute ? el.getAttribute(attr) : '';
+          if (!val || typeof val !== 'string') continue;
+          const actMatch = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
+          if (actMatch) {
+            if (!info.activityUrn) info.activityUrn = actMatch[1];
+            info.allKeys.add(actMatch[1]);
+            info.allKeys.add(actMatch[0]);
+          }
+          const mediaMatch = val.match(/urn:li:(?:digitalmediaAsset|fs_video|video|dms):([A-Za-z0-9_-]{8,})/i);
+          if (mediaMatch) {
+            if (!info.mediaKey) info.mediaKey = mediaMatch[1];
+            info.allKeys.add(mediaMatch[1]);
+            info.allKeys.add(mediaMatch[0]);
+          }
+        }
+        if (info.activityUrn && info.mediaKey) break;
+      }
+      if (info.activityUrn) break;
     }
 
     info.primaryKey = info.mediaKey || info.activityUrn || '';
@@ -491,25 +488,6 @@
   function extractVideoEntityKeyFromDom(video) {
     const info = extractVideoEntityInfoFromDom(video);
     return info.primaryKey;
-  }
-
-  function cleanEntityKey(key) {
-    if (!key) return '';
-    return key.replace(/^urn:li:[^:]+:/i, '').trim();
-  }
-
-  function entityKeysMatch(key1, key2) {
-    if (!key1 || !key2) return false;
-    const k1 = cleanEntityKey(key1);
-    const k2 = cleanEntityKey(key2);
-    if (k1 === k2) return true;
-    if (k1.includes(k2) || k2.includes(k1)) return true;
-    if (k1.length > 10 && k2.length > 10) {
-      const sub1 = k1.slice(1);
-      const sub2 = k2.slice(1);
-      if (sub1 === sub2 || sub1.includes(sub2) || sub2.includes(sub1)) return true;
-    }
-    return false;
   }
 
   /**
@@ -664,31 +642,32 @@
   }
 
   function matchesVideoMetadata(videoState, meta) {
-    if (!meta) return false;
+    if (!videoState || !meta) return false;
 
-    const targetKeys = [
-      videoState.entityKey,
-      videoState.mediaKey,
-      videoState.activityUrn,
-      ...(videoState.allKeys ? Array.from(videoState.allKeys) : [])
-    ].filter(Boolean);
-
-    const metaKeys = [
-      meta.entityUrn,
-      meta.mediaKey,
-      ...(meta.allKeys || [])
-    ].filter(Boolean);
-
-    if (targetKeys.length > 0) {
-      for (const tk of targetKeys) {
-        for (const mk of metaKeys) {
-          if (entityKeysMatch(tk, mk)) return true;
-        }
-      }
+    // 1. Match by mediaKey (most specific)
+    if (videoState.mediaKey && meta.mediaKey) {
+      if (entityKeysMatch(videoState.mediaKey, meta.mediaKey)) return true;
       return false;
     }
 
-    if (videoRegistry.size === 1) return true;
+    // 2. Match by post activity URN
+    if (videoState.activityUrn && meta.activityUrn) {
+      if (entityKeysMatch(videoState.activityUrn, meta.activityUrn)) return true;
+      return false;
+    }
+
+    // 3. Match by active blob URL
+    if (videoState.currentBlobUrl && meta.blobUrl && videoState.currentBlobUrl === meta.blobUrl) {
+      return true;
+    }
+
+    // 4. Match by stream key in captured segments
+    if (videoState.allSegments && videoState.allSegments.length > 0 && meta.mediaKey) {
+      if (videoState.allSegments.some(s => streamUrlMatchesKey(s, meta.mediaKey))) {
+        return true;
+      }
+    }
+
     return false;
   }
 
@@ -712,35 +691,34 @@
         const json = JSON.parse(text);
         const collected = [];
 
-        function scan(node, depth = 0, currentAncestorKeys = []) {
+        function scan(node, depth = 0, currentPostActivityUrn = null) {
           if (!node || depth > 12 || typeof node !== 'object') return;
-          const nodeKeys = [...currentAncestorKeys];
-          const checkNodeVal = (val) => {
-            if (!val || typeof val !== 'string') return;
-            nodeKeys.push(val);
-            const m1 = val.match(/(?:digitalmediaAsset|fs_video|video|dms):([A-Za-z0-9_-]{8,})/i);
-            if (m1) nodeKeys.push(m1[1]);
-            const m2 = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
-            if (m2) nodeKeys.push(m2[1]);
-            const m3 = val.match(/([A-Za-z0-9_-]{12,})/);
-            if (m3) nodeKeys.push(m3[1]);
+
+          let postUrn = currentPostActivityUrn;
+          const checkUrnForActivity = (val) => {
+            if (!val || typeof val !== 'string') return null;
+            const m = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
+            return m ? m[1] : null;
           };
-          if (node.urn) checkNodeVal(node.urn);
-          if (node.entityUrn) checkNodeVal(node.entityUrn);
-          if (node['$id']) checkNodeVal(node['$id']);
+
+          if (!postUrn) {
+            postUrn = checkUrnForActivity(node.urn) ||
+                      checkUrnForActivity(node.entityUrn) ||
+                      checkUrnForActivity(node['$id']);
+          }
 
           if (node.videoPlayMetadata && typeof node.videoPlayMetadata === 'object') {
-            collected.push({ parent: node, vpm: node.videoPlayMetadata, ancestorKeys: nodeKeys });
+            collected.push({ parent: node, vpm: node.videoPlayMetadata, activityUrn: postUrn });
           }
           if (Array.isArray(node.progressiveStreams) || Array.isArray(node.adaptiveStreams)) {
-            collected.push({ parent: node, vpm: node, ancestorKeys: nodeKeys });
+            collected.push({ parent: node, vpm: node, activityUrn: postUrn });
           }
           if (Array.isArray(node)) {
-            for (const item of node) scan(item, depth + 1, nodeKeys);
+            for (const item of node) scan(item, depth + 1, postUrn);
           } else {
             for (const k of Object.keys(node)) {
               if (k === 'videoPlayMetadata') continue;
-              scan(node[k], depth + 1, nodeKeys);
+              scan(node[k], depth + 1, postUrn);
             }
           }
         }
@@ -751,34 +729,30 @@
           const vpm = item.vpm;
           const parent = item.parent || {};
 
-          const allKeys = new Set();
-          if (item.ancestorKeys) {
-            for (const ak of item.ancestorKeys) allKeys.add(ak);
-          }
-          const checkUrn = (val) => {
-            if (!val || typeof val !== 'string') return;
-            allKeys.add(val);
-            const m1 = val.match(/(?:digitalmediaAsset|fs_video|video|dms):([A-Za-z0-9_-]{8,})/i);
-            if (m1) allKeys.add(m1[1]);
-            const m2 = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
-            if (m2) allKeys.add(m2[1]);
-            const m3 = val.match(/([A-Za-z0-9_-]{12,})/);
-            if (m3) allKeys.add(m3[1]);
+          let mediaKey = null;
+          const checkMediaVal = (val) => {
+            if (!val || typeof val !== 'string') return null;
+            const m = val.match(/(?:digitalmediaAsset|fs_video|video|dms):([A-Za-z0-9_-]{8,})/i) ||
+                      val.match(/^([CD][A-Za-z0-9_-]{14,})$/);
+            return m ? m[1] : null;
           };
 
-          checkUrn(vpm.entityUrn);
-          checkUrn(vpm.mediaUrn);
-          checkUrn(parent.entityUrn);
-          checkUrn(parent.urn);
-          checkUrn(parent['$id']);
-          for (const [k, v] of Object.entries(parent)) {
-            if (typeof v === 'string' && (v.includes('urn:li:') || v.length > 10)) {
-              checkUrn(v);
-            }
-          }
+          mediaKey = checkMediaVal(vpm.mediaUrn) ||
+                     checkMediaVal(vpm.entityUrn) ||
+                     checkMediaVal(parent.mediaUrn) ||
+                     checkMediaVal(parent.entityUrn) ||
+                     checkMediaVal(parent.urn) ||
+                     checkMediaVal(parent['$id']);
 
-          const entityUrn = vpm.entityUrn || vpm.mediaUrn || parent.entityUrn || parent.urn || '';
-          const mediaKey = cleanEntityKey(vpm.entityUrn || vpm.mediaUrn || '');
+          let activityUrn = item.activityUrn;
+          if (!activityUrn) {
+            const checkActVal = (val) => {
+              if (!val || typeof val !== 'string') return null;
+              const m = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
+              return m ? m[1] : null;
+            };
+            activityUrn = checkActVal(parent.urn) || checkActVal(parent.entityUrn) || checkActVal(parent['$id']);
+          }
 
           const progStreams = vpm.progressiveStreams || [];
           let bestProgUrl = null;
@@ -789,11 +763,12 @@
               if (resA !== resB) return resB - resA;
               return (b.bitRate || 0) - (a.bitRate || 0);
             });
-            for (const item of sorted) {
-              if (!item) continue;
-              const u = extractMediaUrlFromItem(item);
+            for (const pItem of sorted) {
+              if (!pItem) continue;
+              const u = extractMediaUrlFromItem(pItem);
               if (u && typeof u === 'string' && isGenuineProgressiveMp4Url(u)) {
                 bestProgUrl = u;
+                if (!mediaKey) mediaKey = extractStreamKey(u);
                 break;
               }
             }
@@ -812,15 +787,16 @@
             } else if (proto === 'HLS' || u.includes('.m3u8') || u.includes('/hls/')) {
               if (!hlsUrl) hlsUrl = u;
             }
+            if (!mediaKey) mediaKey = extractStreamKey(u);
           }
 
           const dur = vpm.duration ? (vpm.duration > 1000 ? vpm.duration / 1000 : vpm.duration) : 0;
 
           if (bestProgUrl || dashUrl || hlsUrl) {
             results.push({
-              entityUrn,
-              mediaKey,
-              allKeys: Array.from(allKeys),
+              entityUrn: mediaKey ? `urn:li:digitalmediaAsset:${mediaKey}` : (activityUrn ? `urn:li:activity:${activityUrn}` : ''),
+              mediaKey: mediaKey || null,
+              activityUrn: activityUrn || null,
               progressiveUrl: bestProgUrl,
               manifestUrl: dashUrl || hlsUrl,
               dashUrl,
@@ -869,7 +845,63 @@
   }
 
   function registerVideo(video) {
-    if (videoRegistry.has(video)) return;
+    if (videoRegistry.has(video)) {
+      const existingState = videoRegistry.get(video);
+      const info = extractVideoEntityInfoFromDom(video);
+      const curSrc = video.currentSrc || video.src || '';
+      const curPoster = video.getAttribute('poster') || '';
+
+      const activityChanged = info.activityUrn && existingState.activityUrn && info.activityUrn !== existingState.activityUrn;
+      const mediaKeyChanged = info.mediaKey && existingState.mediaKey && !entityKeysMatch(info.mediaKey, existingState.mediaKey);
+      const posterChanged = curPoster && existingState.poster && curPoster !== existingState.poster;
+
+      if (activityChanged || mediaKeyChanged || posterChanged) {
+        console.log(`[Garrett] Video element recycled for new post (old activity=${existingState.activityUrn}, new activity=${info.activityUrn})`);
+        resetVideoStateForNewStream(existingState, curSrc);
+        existingState.poster = curPoster;
+        existingState.activityUrn = info.activityUrn;
+        existingState.mediaKey = info.mediaKey;
+        existingState.entityKey = info.primaryKey || info.mediaKey || info.activityUrn;
+        existingState.allKeys = new Set(info.allKeys);
+
+        // Pre-check discovered network metadata and embedded JSON for this new video
+        try {
+          const allMeta = [...discoveredMetadataCache, ...extractAllEmbeddedVideoMetadata()];
+          for (const m of allMeta) {
+            if (matchesVideoMetadata(existingState, m)) {
+              if (m.progressiveUrl) existingState.progressiveUrl = m.progressiveUrl;
+              if (m.manifestUrl) existingState.manifestUrl = m.manifestUrl;
+              if (m.mediaKey) existingState.mediaKey = m.mediaKey;
+              if (m.duration && m.duration > 0 && (!existingState.duration || existingState.duration <= 5)) existingState.duration = m.duration;
+              if (m.progressiveUrl) break;
+            }
+          }
+        } catch (e) {}
+        if (!existingState.overlayBtn || !existingState.overlayBtn.isConnected) {
+          createOverlayUI(existingState);
+        }
+        notifyBackground(existingState);
+      } else {
+        if (!existingState.activityUrn && info.activityUrn) {
+          existingState.activityUrn = info.activityUrn;
+          if (!existingState.entityKey) existingState.entityKey = info.activityUrn;
+        }
+        if (!existingState.mediaKey && info.mediaKey) {
+          existingState.mediaKey = info.mediaKey;
+          if (!existingState.entityKey || /^\d+$/.test(existingState.entityKey)) existingState.entityKey = info.mediaKey;
+        }
+        if (info.allKeys) {
+          for (const k of info.allKeys) existingState.allKeys.add(k);
+        }
+        if (!existingState.poster && curPoster) {
+          existingState.poster = curPoster;
+        }
+        if (!existingState.overlayBtn || !existingState.overlayBtn.isConnected) {
+          createOverlayUI(existingState);
+        }
+      }
+      return;
+    }
 
     const id = `vbs-${nextVideoId++}`;
     video.setAttribute('data-garrett-video-id', id);
@@ -978,11 +1010,17 @@
         id: state.id,
         src: src,
         entityKey: entityKey,
+        mediaKey: state.mediaKey || '',
+        activityUrn: state.activityUrn || '',
         isBlob: src.startsWith('blob:'),
         poster: state.poster,
         duration: realDur,
         width: v ? (v.videoWidth || 0) : 0,
-        height: v ? (v.videoHeight || 0) : 0
+        height: v ? (v.videoHeight || 0) : 0,
+        format: state.progressiveUrl ? 'MP4' : (state.manifestUrl ? (state.manifestUrl.includes('.m3u8') ? 'HLS' : 'DASH') : (src.startsWith('blob:') ? 'DASH' : 'MP4')),
+        streamUrl: state.progressiveUrl || state.manifestUrl || src,
+        hasProgressive: !!state.progressiveUrl,
+        hasManifest: !!state.manifestUrl
       }
     });
 
@@ -1084,25 +1122,30 @@
     const video = state.video;
     const currentSrc = video ? (video.currentSrc || video.src || '') : '';
     const domInfo = extractVideoEntityInfoFromDom(video);
-    if (domInfo.mediaKey && !state.mediaKey) state.mediaKey = domInfo.mediaKey;
-    if (domInfo.primaryKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
-      state.entityKey = domInfo.primaryKey;
+    if (domInfo.mediaKey && (!state.mediaKey || state.mediaKey !== domInfo.mediaKey)) {
+      state.mediaKey = domInfo.mediaKey;
     }
-    if (domInfo.allKeys && state.allKeys) {
-      for (const k of domInfo.allKeys) state.allKeys.add(k);
+    if (domInfo.activityUrn && (!state.activityUrn || state.activityUrn !== domInfo.activityUrn)) {
+      state.activityUrn = domInfo.activityUrn;
     }
+    if (domInfo.primaryKey) state.entityKey = domInfo.primaryKey;
     const entityKey = state.mediaKey || state.entityKey;
     state.entityKey = entityKey;
     const duration = resolveRealVideoDuration(state);
 
-    // Fast Path 0: Already cached progressive MP4 URL
+    // Fast Path 0: Already cached progressive MP4 URL (validate it matches this video's mediaKey)
     if (state.progressiveUrl) {
-      return {
-        progressiveUrl: state.progressiveUrl,
-        isStream: false,
-        format: 'DIRECT',
-        streamKey: state.mediaKey || entityKey
-      };
+      const progKey = extractStreamKey(state.progressiveUrl);
+      if (!state.mediaKey || !progKey || entityKeysMatch(state.mediaKey, progKey)) {
+        return {
+          progressiveUrl: state.progressiveUrl,
+          isStream: false,
+          format: 'DIRECT',
+          streamKey: state.mediaKey || entityKey
+        };
+      } else {
+        state.progressiveUrl = null;
+      }
     }
 
     // Trigger immediate React Fiber query
@@ -1114,7 +1157,7 @@
 
     // Fast Path 1: Check React Stream Cache
     const rMetaFast = (state.id && reactStreamCache.get(state.id)) || (currentSrc && reactStreamCache.get(currentSrc));
-    if (rMetaFast) {
+    if (rMetaFast && matchesVideoMetadata(state, rMetaFast)) {
       if (rMetaFast.duration && rMetaFast.duration > 0 && (!state.duration || state.duration <= 5)) {
         state.duration = rMetaFast.duration;
       }
@@ -1124,7 +1167,7 @@
           progressiveUrl: rMetaFast.progressiveUrl,
           isStream: false,
           format: 'DIRECT',
-          streamKey: rMetaFast.entityUrn || entityKey
+          streamKey: rMetaFast.mediaKey || state.mediaKey || entityKey
         };
       }
       if (rMetaFast.manifestUrl && !state.manifestUrl) {
@@ -1136,12 +1179,9 @@
     try {
       const allMeta = [...discoveredMetadataCache, ...extractAllEmbeddedVideoMetadata()];
       for (const m of allMeta) {
-        const keyMatch = matchesVideoMetadata(state, m);
-        if (keyMatch) {
+        if (matchesVideoMetadata(state, m)) {
           if (m.mediaKey) state.mediaKey = m.mediaKey;
-          if (m.mediaKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
-            state.entityKey = m.mediaKey;
-          }
+          if (m.activityUrn) state.activityUrn = m.activityUrn;
           if (m.duration && m.duration > 0 && (!state.duration || state.duration <= 5)) {
             state.duration = m.duration;
           }
@@ -1151,7 +1191,7 @@
               progressiveUrl: m.progressiveUrl,
               isStream: false,
               format: 'DIRECT',
-              streamKey: m.mediaKey || state.entityKey
+              streamKey: m.mediaKey || state.mediaKey || state.entityKey
             };
           }
           if (m.manifestUrl && !state.manifestUrl) {
@@ -1181,14 +1221,14 @@
     while (Date.now() - startTime < maxWaitMs) {
       // Check React Cache again if arrived asynchronously
       const rMetaAsync = (state.id && reactStreamCache.get(state.id)) || (currentSrc && reactStreamCache.get(currentSrc));
-      if (rMetaAsync) {
+      if (rMetaAsync && matchesVideoMetadata(state, rMetaAsync)) {
         if (rMetaAsync.progressiveUrl) {
           state.progressiveUrl = rMetaAsync.progressiveUrl;
           return {
             progressiveUrl: rMetaAsync.progressiveUrl,
             isStream: false,
             format: 'DIRECT',
-            streamKey: rMetaAsync.entityUrn || state.entityKey
+            streamKey: rMetaAsync.mediaKey || state.mediaKey || state.entityKey
           };
         }
         if (rMetaAsync.manifestUrl && !state.manifestUrl) {
@@ -1204,48 +1244,27 @@
             if (k) {
               if (!state.mediaKey) state.mediaKey = k;
               if (state.allKeys) state.allKeys.add(k);
-              if (!state.entityKey || /^\d+$/.test(state.entityKey)) state.entityKey = k;
               break;
             }
           }
         }
 
         const resEntries = performance.getEntriesByType('resource');
-        const isPlaying = video && (!video.paused || video.currentTime > 0);
-        const otherPlaying = Array.from(videoRegistry.values()).filter(other => other !== state && other.video && !other.video.paused);
-
         for (let i = resEntries.length - 1; i >= 0; i--) {
           const name = resEntries[i].name;
           if (isNonMediaUrl(name)) continue;
 
           const nameKey = extractStreamKey(name);
-          let matchesKey = state.entityKey ? entityKeysMatch(state.entityKey, name) : false;
-          if (!matchesKey && nameKey && state.mediaKey) {
-            matchesKey = entityKeysMatch(state.mediaKey, nameKey);
-          }
-          if (!matchesKey && state.allKeys) {
-            for (const k of state.allKeys) {
-              if (entityKeysMatch(k, name) || (nameKey && entityKeysMatch(k, nameKey))) { matchesKey = true; break; }
-            }
-          }
-          if (!matchesKey && nameKey && state.allSegments && state.allSegments.length > 0) {
-            matchesKey = state.allSegments.some(s => extractStreamKey(s) === nameKey);
-          }
-          if (!matchesKey && isPlaying && otherPlaying.length === 0 && (resEntries.length - 1 - i < 20)) {
-            if (name.includes('/playlist/vid/') || name.includes('/dash/')) {
-              matchesKey = true;
-            }
+          if (!nameKey) continue;
+          let matchesKey = state.mediaKey ? entityKeysMatch(state.mediaKey, nameKey) : false;
+          if (!matchesKey && state.allSegments && state.allSegments.length > 0) {
+            matchesKey = state.allSegments.some(s => streamUrlMatchesKey(s, nameKey));
           }
 
           if (matchesKey) {
-            // Guard: ensure this URL is not already claimed by another video in videoRegistry!
             const isClaimedByOther = Array.from(videoRegistry.values()).some(other => other !== state && (other.progressiveUrl === name || other.manifestUrl === name));
             if (isClaimedByOther) continue;
-            const streamKey = nameKey || extractStreamKey(name);
-            if (streamKey && !state.mediaKey) state.mediaKey = streamKey;
-            if (streamKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
-              state.entityKey = streamKey;
-            }
+            if (!state.mediaKey) state.mediaKey = nameKey;
 
             if (isGenuineProgressiveMp4Url(name)) {
               state.progressiveUrl = name;
@@ -1253,7 +1272,7 @@
                 progressiveUrl: name,
                 isStream: false,
                 format: 'DIRECT',
-                streamKey: state.entityKey
+                streamKey: state.mediaKey || state.entityKey
               };
             }
             const isDashOrHls = (name.includes('.mpd') || name.includes('/dash/') || name.includes('.m3u8') || (name.includes('/playlist/vid/') && name.includes('manifest'))) &&
@@ -1525,12 +1544,12 @@
           const name = resEntries[i].name;
           if (isNonMediaUrl(name)) continue;
           if (name.includes('.m4s') || name.includes('.ts') || name.includes('/segment/') || /\/[0-9]+\/[0-9]+(?:\?|$)/.test(name)) {
-            let matches = (state.mediaKey && entityKeysMatch(state.mediaKey, name)) ||
-                          (state.entityKey && entityKeysMatch(state.entityKey, name));
+            let matches = (state.mediaKey && streamUrlMatchesKey(name, state.mediaKey)) ||
+                          (state.entityKey && streamUrlMatchesKey(name, state.entityKey));
             if (!matches && candidateSet.size > 0) {
               for (const existingUrl of candidateSet) {
                 const sampleKey = extractStreamKey(existingUrl);
-                if (sampleKey && entityKeysMatch(sampleKey, name)) {
+                if (sampleKey && streamUrlMatchesKey(name, sampleKey)) {
                   matches = true;
                   break;
                 }
@@ -1700,6 +1719,35 @@
     }
     state.isDownloading = true;
 
+    // Refresh live DOM entity keys right before download
+    if (state.video && state.video.isConnected) {
+      const liveInfo = extractVideoEntityInfoFromDom(state.video);
+      if (liveInfo.mediaKey && (!state.mediaKey || state.mediaKey !== liveInfo.mediaKey)) {
+        state.mediaKey = liveInfo.mediaKey;
+      }
+      if (liveInfo.activityUrn && (!state.activityUrn || state.activityUrn !== liveInfo.activityUrn)) {
+        state.activityUrn = liveInfo.activityUrn;
+      }
+      if (liveInfo.primaryKey) state.entityKey = liveInfo.primaryKey;
+    }
+
+    // Safety guard: Clear stale progressiveUrl or manifestUrl if they don't match this video's mediaKey
+    if (state.progressiveUrl && state.mediaKey) {
+      const progStreamKey = extractStreamKey(state.progressiveUrl);
+      if (progStreamKey && !entityKeysMatch(state.mediaKey, progStreamKey)) {
+        console.warn(`[Garrett] Cleared mismatched progressiveUrl (${progStreamKey} !== ${state.mediaKey})`);
+        state.progressiveUrl = null;
+      }
+    }
+    if (state.manifestUrl && state.mediaKey) {
+      const manStreamKey = extractStreamKey(state.manifestUrl);
+      if (manStreamKey && !entityKeysMatch(state.mediaKey, manStreamKey)) {
+        console.warn(`[Garrett] Cleared mismatched manifestUrl (${manStreamKey} !== ${state.mediaKey})`);
+        state.manifestUrl = null;
+        state.manifestXml = null;
+      }
+    }
+
     const quoteObj = keeper ? keeper.getRandomKeeperQuote() : null;
     if (quoteObj) {
       showToast(`"${quoteObj.quote}"`);
@@ -1762,24 +1810,9 @@
       let manifestXml = (stream && stream.manifestXml) || state.manifestXml || '';
 
       // If manifest URL was not yet set, scan performance resource entries BEFORE segment queue
-      if (!manifestUrl) {
-        if (state.allSegments && state.allSegments.length > 0) {
-          for (const seg of state.allSegments) {
-            const k = extractStreamKey(seg);
-            if (k) {
-              if (!state.mediaKey) state.mediaKey = k;
-              if (state.allKeys) state.allKeys.add(k);
-              if (!state.entityKey || /^\d+$/.test(state.entityKey)) state.entityKey = k;
-              break;
-            }
-          }
-        }
-
+      if (!manifestUrl && state.mediaKey) {
         try {
           const resEntries = performance.getEntriesByType('resource');
-          const isPlaying = state.video && (!state.video.paused || state.video.currentTime > 0);
-          const otherPlaying = Array.from(videoRegistry.values()).filter(other => other !== state && other.video && !other.video.paused);
-
           for (let i = resEntries.length - 1; i >= 0; i--) {
             const name = resEntries[i].name;
             if (isNonMediaUrl(name)) continue;
@@ -1790,23 +1823,7 @@
               if (isClaimedByOther) continue;
 
               const nameKey = extractStreamKey(name);
-              let matchesKey = state.entityKey ? entityKeysMatch(state.entityKey, name) : false;
-              if (!matchesKey && nameKey && state.mediaKey) {
-                matchesKey = entityKeysMatch(state.mediaKey, nameKey);
-              }
-              if (!matchesKey && state.allKeys) {
-                for (const k of state.allKeys) {
-                  if (entityKeysMatch(k, name) || (nameKey && entityKeysMatch(k, nameKey))) { matchesKey = true; break; }
-                }
-              }
-              if (!matchesKey && nameKey && state.allSegments && state.allSegments.length > 0) {
-                matchesKey = state.allSegments.some(seg => extractStreamKey(seg) === nameKey);
-              }
-              if (!matchesKey && isPlaying && otherPlaying.length === 0 && (resEntries.length - 1 - i < 20)) {
-                matchesKey = true;
-              }
-
-              if (matchesKey || videoRegistry.size === 1) {
+              if (nameKey && entityKeysMatch(state.mediaKey, nameKey)) {
                 manifestUrl = name;
                 state.manifestUrl = name;
                 if (queue) queue.registerManifest(name);
@@ -1859,14 +1876,13 @@
             const isClaimedByOther = Array.from(videoRegistry.values()).some(other => other !== state && (other.progressiveUrl === name || other.manifestUrl === name));
             if (isClaimedByOther) continue;
 
-            let matchesKey = state.entityKey ? entityKeysMatch(state.entityKey, name) : false;
-            if (!matchesKey && state.allKeys) {
-              for (const k of state.allKeys) {
-                if (entityKeysMatch(k, name)) { matchesKey = true; break; }
-              }
+            const nameKey = extractStreamKey(name);
+            if (!nameKey) continue;
+            let matchesKey = state.mediaKey ? entityKeysMatch(state.mediaKey, nameKey) : false;
+            if (!matchesKey && state.allSegments && state.allSegments.length > 0) {
+              matchesKey = state.allSegments.some(s => streamUrlMatchesKey(s, nameKey));
             }
-            const isAllowed = matchesKey || videoRegistry.size === 1;
-            if (!isAllowed) continue;
+            if (!matchesKey) continue;
 
             // 5a. Check if manifest is present in performance entries
             if (!state.manifestUrl && (name.includes('.mpd') || name.includes('/dash/') || name.includes('.m3u8')) && !name.includes('.m4s') && !name.includes('.ts')) {
@@ -1913,6 +1929,14 @@
   }
 
   function scanForVideos() {
+    // 1. Clean up disconnected / unmounted video elements
+    for (const [v, state] of videoRegistry.entries()) {
+      if (!v || !v.isConnected) {
+        if (state.overlayBtn) state.overlayBtn.remove();
+        videoRegistry.delete(v);
+      }
+    }
+    // 2. Discover and register current videos in the DOM
     const videos = findAllVideos(document);
     videos.forEach(v => registerVideo(v));
   }
@@ -1964,6 +1988,8 @@
           src: currentSrc,
           isBlob: currentSrc.startsWith('blob:'),
           entityKey: state.entityKey,
+          mediaKey: state.mediaKey || '',
+          activityUrn: state.activityUrn || '',
           poster: state.poster,
           duration: realDur,
           width: v ? (v.videoWidth || 0) : 0,
@@ -1980,13 +2006,21 @@
     }
 
     if (request.action === 'harvestVideo' || request.action === 'keepVideo') {
-      let state = Array.from(videoRegistry.values()).find(s => s.id === request.videoId) ||
-                  Array.from(videoRegistry.values())[0];
+      let state = null;
+      if (request.videoId) {
+        state = Array.from(videoRegistry.values()).find(s => s.id === request.videoId);
+      }
+      if (!state && !request.videoId) {
+        state = Array.from(videoRegistry.values())[0];
+      }
       if (!state && request.streamUrl) {
         state = {
           id: request.videoId || `vbs-ext-${Date.now()}`,
           video: null,
           entityKey: '',
+          mediaKey: extractStreamKey(request.streamUrl) || '',
+          activityUrn: '',
+          allKeys: new Set(),
           poster: '',
           progressiveUrl: null,
           manifestUrl: null,
@@ -1996,14 +2030,18 @@
         };
       }
       if (state) {
-        if (request.progressiveUrl) {
+        if (request.progressiveUrl && (!state.mediaKey || streamUrlMatchesKey(request.progressiveUrl, state.mediaKey))) {
           state.progressiveUrl = request.progressiveUrl;
         }
         if (request.streamUrl) {
           if (isGenuineProgressiveMp4Url(request.streamUrl)) {
-            state.progressiveUrl = request.streamUrl;
+            if (!state.mediaKey || streamUrlMatchesKey(request.streamUrl, state.mediaKey)) {
+              state.progressiveUrl = request.streamUrl;
+            }
           } else if (!state.progressiveUrl && (request.streamUrl.includes('.mpd') || request.streamUrl.includes('/dash/') || request.streamUrl.includes('.m3u8'))) {
-            state.manifestUrl = request.streamUrl;
+            if (!state.mediaKey || streamUrlMatchesKey(request.streamUrl, state.mediaKey)) {
+              state.manifestUrl = request.streamUrl;
+            }
           }
         }
         if (request.manifestXml) {
@@ -2021,10 +2059,15 @@
     }
 
     if (request.action === 'directDownload') {
-      const state = Array.from(videoRegistry.values()).find(s => s.id === request.videoId) ||
-                    Array.from(videoRegistry.values())[0];
+      let state = null;
+      if (request.videoId) {
+        state = Array.from(videoRegistry.values()).find(s => s.id === request.videoId);
+      }
+      if (!state && !request.videoId) {
+        state = Array.from(videoRegistry.values())[0];
+      }
       if (state) {
-        const dlUrl = state.progressiveUrl || state.video.currentSrc || state.video.src || '';
+        const dlUrl = state.progressiveUrl || (state.video ? (state.video.currentSrc || state.video.src || '') : '');
         if (dlUrl && !dlUrl.startsWith('blob:')) {
           const filename = generateFilename(state.video, 'mp4');
           safeSendMessage({ action: 'downloadUrl', url: dlUrl, filename, saveAs: false });
@@ -2041,8 +2084,13 @@
     }
 
     if (request.action === 'startKeepStream') {
-      const state = Array.from(videoRegistry.values()).find(s => s.id === request.videoId) ||
-                    Array.from(videoRegistry.values())[0];
+      let state = null;
+      if (request.videoId) {
+        state = Array.from(videoRegistry.values()).find(s => s.id === request.videoId);
+      }
+      if (!state && !request.videoId) {
+        state = Array.from(videoRegistry.values())[0];
+      }
       if (state) {
         downloadStreamInPage(state, request.url).catch(e => {
           console.error('[Garrett] startKeepStream error:', e);
@@ -2072,14 +2120,14 @@
 
     if (request.action === 'progressiveDiscovered' && request.url) {
       const streamKey = extractStreamKey(request.url);
-      for (const state of videoRegistry.values()) {
-        const hasKeys = !!(state.entityKey || (state.allKeys && state.allKeys.size > 0));
-        const matches = (state.entityKey && entityKeysMatch(state.entityKey, request.url)) ||
-                        (state.allKeys && Array.from(state.allKeys).some(k => entityKeysMatch(k, request.url))) ||
-                        (!hasKeys && videoRegistry.size === 1);
-        if (matches) {
-          state.progressiveUrl = request.url;
-          if (streamKey && !state.mediaKey) state.mediaKey = streamKey;
+      if (streamKey) {
+        for (const state of videoRegistry.values()) {
+          if (state.mediaKey && entityKeysMatch(state.mediaKey, streamKey)) {
+            state.progressiveUrl = request.url;
+          } else if (streamUrlMatchesKey(request.url, state.entityKey) || (state.allKeys && Array.from(state.allKeys).some(k => streamUrlMatchesKey(request.url, k)))) {
+            state.progressiveUrl = request.url;
+            if (!state.mediaKey) state.mediaKey = streamKey;
+          }
         }
       }
       sendResponse({ received: true });

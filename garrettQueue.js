@@ -17,21 +17,32 @@
 
   function cleanEntityKey(key) {
     if (!key) return '';
-    return key.replace(/^urn:li:[^:]+:/i, '').trim();
+    return String(key).replace(/^urn:li:[^:]+:/i, '').trim();
   }
 
   function entityKeysMatch(key1, key2) {
     if (!key1 || !key2) return false;
     const k1 = cleanEntityKey(key1);
     const k2 = cleanEntityKey(key2);
+    if (!k1 || !k2) return false;
     if (k1 === k2) return true;
-    if (k1.includes(k2) || k2.includes(k1)) return true;
-    if (k1.length > 10 && k2.length > 10) {
-      const sub1 = k1.slice(1);
-      const sub2 = k2.slice(1);
-      if (sub1 === sub2 || sub1.includes(sub2) || sub2.includes(sub1)) return true;
+
+    const isNum1 = /^\d+$/.test(k1);
+    const isNum2 = /^\d+$/.test(k2);
+    if (isNum1 && isNum2) return k1 === k2;
+    if (isNum1 !== isNum2) return false;
+
+    if (k1.length === k2.length && k1.length >= 14) {
+      if (k1.slice(1) === k2.slice(1)) return true;
     }
     return false;
+  }
+
+  function streamUrlMatchesKey(url, key) {
+    if (!url || !key) return false;
+    const streamKey = extractStreamKey(url);
+    if (!streamKey) return false;
+    return entityKeysMatch(streamKey, key);
   }
 
   function isNonMediaUrl(url) {
@@ -470,7 +481,7 @@
      */
     findStreamForVideo(videoInfo = {}) {
       const src = videoInfo.currentSrc || videoInfo.src || '';
-      const entityKey = videoInfo.entityKey || extractStreamKey(videoInfo.poster || '') || '';
+      const entityKey = videoInfo.mediaKey || videoInfo.entityKey || '';
       const duration = videoInfo.duration || 0;
       const tabId = videoInfo.tabId || 0;
 

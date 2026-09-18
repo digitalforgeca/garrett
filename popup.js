@@ -104,7 +104,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
       videos.forEach((vid, idx) => {
         const matchedStream = netStreams.find(s =>
+          (vid.mediaKey && (s.entityKey === vid.mediaKey || s.streamKey === vid.mediaKey)) ||
           (vid.entityKey && (s.entityKey === vid.entityKey || s.streamKey === vid.entityKey)) ||
+          (vid.activityUrn && (s.activityUrn === vid.activityUrn || s.entityKey === vid.activityUrn)) ||
           (vid.src && (s.blobUrl === vid.src || s.url === vid.src))
         );
         renderVideoCard(vid, idx, matchedStream, tab.id);
