@@ -143,11 +143,14 @@ chrome.webRequest.onResponseStarted.addListener(
     // 3. Detect Progressive MP4 Streams
     const isProgressiveMp4 =
       (cleanUrl.includes('/playlist/vid/v2/') || cleanUrl.includes('/playlist/vid/')) &&
-      (cleanUrl.endsWith('.mp4') || cleanUrl.includes('mp4_') || (cleanUrl.includes('/mp4-') && cleanUrl.endsWith('.mp4'))) &&
+      !cleanUrl.includes('/dash/') &&
+      !cleanUrl.includes('/hls/') &&
       !cleanUrl.endsWith('.m4s') &&
       !cleanUrl.endsWith('.ts') &&
       !cleanUrl.endsWith('.init') &&
       !cleanUrl.endsWith('/init') &&
+      !cleanUrl.endsWith('.mpd') &&
+      !cleanUrl.endsWith('.m3u8') &&
       !/\/[0-9]+\/[0-9]+$/.test(cleanUrl) &&
       !cleanUrl.includes('videocover');
 

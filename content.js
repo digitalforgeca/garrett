@@ -18,6 +18,10 @@
   // React stream cache from pageHook.js
   const reactStreamCache = new Map(); // blobUrl -> { manifestUrl, entityUrn, duration }
 
+  // MediaSource to Blob mapping for 100% video-to-SourceBuffer isolation
+  const mediaSourceToBlob = new Map();
+  const blobToMediaSource = new Map();
+
   function isNonMediaUrl(url) {
     if (!url || typeof url !== 'string') return true;
     const clean = url.split('?')[0].toLowerCase();
@@ -47,12 +51,21 @@
       clean.includes('output_hls') ||
       clean.endsWith('.mpd') ||
       clean.endsWith('.m3u8') ||
+      clean.includes('/dash/') ||
+      clean.includes('manifest') ||
       /\/[0-9]+\/[0-9]+$/.test(clean) ||
       /\/[0-9]+\/[0-9]+(?:\?|$)/.test(url)
     ) {
       return false;
     }
-    return clean.endsWith('.mp4') || clean.endsWith('.webm') || clean.endsWith('.m4v');
+    return (
+      clean.endsWith('.mp4') ||
+      clean.endsWith('.webm') ||
+      clean.endsWith('.m4v') ||
+      clean.includes('/playlist/vid/v2/') ||
+      (clean.includes('/playlist/vid/') && !clean.includes('/dash/')) ||
+      url.includes('progressive')
+    );
   }
 
   function isInitBox(arrayBuffer) {
@@ -151,10 +164,11 @@
       const streamKey = extractStreamKey(e.detail.url);
       for (const state of videoRegistry.values()) {
         const v = state.video;
+        const hasKeys = !!(state.entityKey || (state.allKeys && state.allKeys.size > 0));
         const matchesState = (state.entityKey && entityKeysMatch(state.entityKey, e.detail.url)) ||
                              (state.allKeys && Array.from(state.allKeys).some(k => entityKeysMatch(k, e.detail.url))) ||
-                             (v && (!v.paused || v.currentTime > 0)) ||
-                             videoRegistry.size === 1;
+                             (!hasKeys && videoRegistry.size === 1) ||
+                             (!hasKeys && v && !v.paused);
         if (matchesState) {
           if (!state.allSegments) state.allSegments = [];
           if (!state.allSegments.includes(e.detail.url)) {
@@ -171,6 +185,10 @@
 
   window.addEventListener('__GARRETT_BLOB_CREATED__', (e) => {
     if (e.detail && e.detail.blobUrl) {
+      if (e.detail.mediaSourceId) {
+        mediaSourceToBlob.set(e.detail.mediaSourceId, e.detail.blobUrl);
+        blobToMediaSource.set(e.detail.blobUrl, e.detail.mediaSourceId);
+      }
       if (queue) {
         queue.registerBlobStream(e.detail.blobUrl, { mediaSourceId: e.detail.mediaSourceId });
       }
@@ -184,9 +202,18 @@
       if (isInit) {
         lastInitChunk = chunk;
       }
+      const msId = e.detail.mediaSourceId;
+      const targetBlobUrl = msId ? mediaSourceToBlob.get(msId) : null;
+
       for (const state of videoRegistry.values()) {
         const v = state.video;
-        if (v && (!v.paused || v.currentTime > 0)) {
+        if (!v) continue;
+        const vSrc = v.currentSrc || v.src || '';
+        const matches = targetBlobUrl
+          ? (vSrc === targetBlobUrl)
+          : (videoRegistry.size === 1 || !v.paused);
+
+        if (matches) {
           if (isInit) {
             state.initChunk = chunk;
           } else {
@@ -209,13 +236,12 @@
       if (discoveredMetadataCache.length > 60) discoveredMetadataCache.shift();
 
       for (const state of videoRegistry.values()) {
-        const v = state.video;
+        const hasKeys = !!(state.entityKey || (state.allKeys && state.allKeys.size > 0));
         const matches = (meta.entityUrn && state.entityKey && entityKeysMatch(state.entityKey, meta.entityUrn)) ||
                         (meta.mediaKey && state.mediaKey && entityKeysMatch(state.mediaKey, meta.mediaKey)) ||
                         (meta.allKeys && state.entityKey && meta.allKeys.some(k => entityKeysMatch(state.entityKey, k))) ||
                         (state.allKeys && meta.entityUrn && Array.from(state.allKeys).some(k => entityKeysMatch(k, meta.entityUrn))) ||
-                        (v && (!v.paused || v.currentTime > 0)) ||
-                        videoRegistry.size === 1;
+                        (!hasKeys && videoRegistry.size === 1);
 
         if (matches) {
           if (meta.progressiveUrl && !state.progressiveUrl) {
@@ -243,8 +269,8 @@
         const matchesVideo = v && (
           v.currentSrc === e.detail.blobUrl ||
           v.src === e.detail.blobUrl ||
-          (!v.paused || v.currentTime > 0) ||
-          videoRegistry.size === 1
+          (e.detail.videoId && state.id === e.detail.videoId) ||
+          (videoRegistry.size === 1)
         );
         if (matchesVideo) {
           if (e.detail.progressiveUrl) state.progressiveUrl = e.detail.progressiveUrl;
@@ -266,10 +292,11 @@
       const streamKey = extractStreamKey(progUrl);
       for (const state of videoRegistry.values()) {
         const v = state.video;
+        const hasKeys = !!(state.entityKey || (state.allKeys && state.allKeys.size > 0));
         const matchesState = (state.entityKey && entityKeysMatch(state.entityKey, progUrl)) ||
                              (state.allKeys && Array.from(state.allKeys).some(k => entityKeysMatch(k, progUrl))) ||
-                             (v && (!v.paused || v.currentTime > 0)) ||
-                             videoRegistry.size === 1;
+                             (!hasKeys && videoRegistry.size === 1) ||
+                             (!hasKeys && v && !v.paused);
         if (matchesState) {
           state.progressiveUrl = progUrl;
           if (streamKey && !state.mediaKey) state.mediaKey = streamKey;
@@ -545,7 +572,6 @@
 
   function matchesVideoMetadata(videoState, meta) {
     if (!meta) return false;
-    if (videoRegistry.size <= 1) return true;
 
     const targetKeys = [
       videoState.entityKey,
@@ -560,17 +586,16 @@
       ...(meta.allKeys || [])
     ].filter(Boolean);
 
-    for (const tk of targetKeys) {
-      for (const mk of metaKeys) {
-        if (entityKeysMatch(tk, mk)) return true;
+    if (targetKeys.length > 0) {
+      for (const tk of targetKeys) {
+        for (const mk of metaKeys) {
+          if (entityKeysMatch(tk, mk)) return true;
+        }
       }
+      return false;
     }
 
-    const realDur = resolveRealVideoDuration(videoState);
-    if (realDur > 3 && meta.duration > 3 && Math.abs(realDur - meta.duration) <= 2.5) {
-      return true;
-    }
-
+    if (videoRegistry.size === 1) return true;
     return false;
   }
 
@@ -1210,6 +1235,64 @@
     }
   }
 
+  function deduplicateChunks(chunks) {
+    if (!chunks || chunks.length <= 1) return chunks || [];
+    const seen = new Set();
+    const result = [];
+    for (const chunk of chunks) {
+      if (!chunk || chunk.byteLength < 16) continue;
+      const len = chunk.byteLength;
+      const u8 = new Uint8Array(chunk instanceof ArrayBuffer ? chunk : chunk.buffer, chunk.byteOffset || 0, Math.min(32, len));
+      let head = '';
+      for (let i = 0; i < u8.length; i++) head += u8[i].toString(16).padStart(2, '0');
+      const tailU8 = new Uint8Array(chunk instanceof ArrayBuffer ? chunk : chunk.buffer, (chunk.byteOffset || 0) + Math.max(0, len - 16), Math.min(16, len));
+      let tail = '';
+      for (let i = 0; i < tailU8.length; i++) tail += tailU8[i].toString(16).padStart(2, '0');
+      const sig = `${len}_${head}_${tail}`;
+      if (!seen.has(sig)) {
+        seen.add(sig);
+        result.push(chunk);
+      }
+    }
+    return result;
+  }
+
+  async function sweepMseBuffer(state, onProgress) {
+    const v = state.video;
+    if (!v) return;
+    const dur = resolveRealVideoDuration(state);
+    if (dur <= 8) return;
+
+    const origTime = v.currentTime;
+    const origMuted = v.muted;
+    const origPaused = v.paused;
+
+    try {
+      v.muted = true;
+      const step = 12; // 12-second forward leaps to trigger the player's MSE buffer engine
+      const steps = [];
+      for (let t = 0; t <= dur; t += step) steps.push(t);
+      if (steps[steps.length - 1] < dur - 2) steps.push(Math.max(0, dur - 1));
+
+      for (let i = 0; i < steps.length; i++) {
+        v.currentTime = steps[i];
+        if (onProgress) {
+          const pct = Math.round(((i + 1) / steps.length) * 50);
+          onProgress(pct);
+        }
+        await new Promise(r => setTimeout(r, 260));
+      }
+    } catch (e) {
+      console.warn('[Garrett] MSE buffer sweep warning:', e.message);
+    } finally {
+      v.currentTime = origTime;
+      v.muted = origMuted;
+      if (!origPaused) {
+        v.play().catch(() => {});
+      }
+    }
+  }
+
   async function downloadFromSegmentQueue(state, segmentUrls) {
     state.isDownloading = true;
 
@@ -1227,12 +1310,32 @@
 
       const realDur = resolveRealVideoDuration(state);
 
+      // Priority 0: If progressive MP4 URL exists, use it!
+      if (state.progressiveUrl && isGenuineProgressiveMp4Url(state.progressiveUrl)) {
+        state.isDownloading = false;
+        return await keepVideoNow(state);
+      }
+
+      // Check authentic MSE chunks coverage
+      const expectedMinChunks = (realDur > 10) ? Math.max(3, Math.floor(realDur / 4.5)) : 3;
+      let rawChunks = state.capturedChunks ? deduplicateChunks(state.capturedChunks) : [];
+
+      // If chunks cover less than expected and video is long, run an automated sweep
+      if (rawChunks.length < expectedMinChunks && realDur > 10 && state.video && (!segmentUrls || segmentUrls.length === 0)) {
+        console.log(`[Garrett] MSE buffer has ${rawChunks.length} chunks (< ${expectedMinChunks} needed for ~${Math.round(realDur)}s). Sweeping timeline...`);
+        if (textEl) textEl.textContent = 'Buffering...';
+        await sweepMseBuffer(state, (pct) => {
+          if (textEl) textEl.textContent = `${pct}%`;
+        });
+        rawChunks = state.capturedChunks ? deduplicateChunks(state.capturedChunks) : [];
+      }
+
       // Priority Path: Authentic MSE captured chunks from the player's active SourceBuffer
-      if (state.capturedChunks && state.capturedChunks.length >= 3) {
+      if (rawChunks.length >= 3 && (rawChunks.length >= expectedMinChunks || (segmentUrls && segmentUrls.length === 0))) {
         const initBuf = state.initChunk || lastInitChunk;
         if (initBuf && isInitBox(initBuf)) {
-          console.log(`[Garrett] Assembling ${state.capturedChunks.length} authentic MSE chunks with initialization header...`);
-          const allBuffers = [initBuf, ...state.capturedChunks];
+          console.log(`[Garrett] Assembling ${rawChunks.length} authentic MSE chunks with initialization header...`);
+          const allBuffers = [initBuf, ...rawChunks];
           const blob = new Blob(allBuffers, { type: 'video/mp4' });
           if (blob.size >= 32768) {
             const filename = generateFilename(state.video, 'mp4');
@@ -1636,6 +1739,22 @@
     if (request.action === 'segmentDiscovered' && request.url) {
       if (queue) {
         queue.registerSegment(request.url);
+      }
+      sendResponse({ received: true });
+      return true;
+    }
+
+    if (request.action === 'progressiveDiscovered' && request.url) {
+      const streamKey = extractStreamKey(request.url);
+      for (const state of videoRegistry.values()) {
+        const hasKeys = !!(state.entityKey || (state.allKeys && state.allKeys.size > 0));
+        const matches = (state.entityKey && entityKeysMatch(state.entityKey, request.url)) ||
+                        (state.allKeys && Array.from(state.allKeys).some(k => entityKeysMatch(k, request.url))) ||
+                        (!hasKeys && videoRegistry.size === 1);
+        if (matches) {
+          state.progressiveUrl = request.url;
+          if (streamKey && !state.mediaKey) state.mediaKey = streamKey;
+        }
       }
       sendResponse({ received: true });
       return true;

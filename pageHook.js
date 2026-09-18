@@ -53,12 +53,21 @@
       clean.includes('output_hls') ||
       clean.endsWith('.mpd') ||
       clean.endsWith('.m3u8') ||
+      clean.includes('/dash/') ||
+      clean.includes('manifest') ||
       /\/[0-9]+\/[0-9]+$/.test(clean) ||
       /\/[0-9]+\/[0-9]+(?:\?|$)/.test(url)
     ) {
       return false;
     }
-    return clean.endsWith('.mp4') || clean.endsWith('.webm') || clean.endsWith('.m4v');
+    return (
+      clean.endsWith('.mp4') ||
+      clean.endsWith('.webm') ||
+      clean.endsWith('.m4v') ||
+      clean.includes('/playlist/vid/v2/') ||
+      (clean.includes('/playlist/vid/') && !clean.includes('/dash/')) ||
+      url.includes('progressive')
+    );
   }
 
   function isProgressiveMp4Url(url) {
@@ -341,6 +350,20 @@
     };
   }
 
+  // 3b. Hook MediaSource.prototype.addSourceBuffer to associate SourceBuffer with mediaSourceId
+  if (typeof MediaSource !== 'undefined' && MediaSource.prototype && MediaSource.prototype.addSourceBuffer) {
+    const origAddSourceBuffer = MediaSource.prototype.addSourceBuffer;
+    MediaSource.prototype.addSourceBuffer = function () {
+      const sb = origAddSourceBuffer.apply(this, arguments);
+      try {
+        if (sb && this.__garrett_ms_id) {
+          sb.__garrett_ms_id = this.__garrett_ms_id;
+        }
+      } catch (e) {}
+      return sb;
+    };
+  }
+
   // 4. Hook SourceBuffer.prototype.appendBuffer for raw MSE chunk capture
   if (typeof SourceBuffer !== 'undefined' && SourceBuffer.prototype) {
     const originalAppendBuffer = SourceBuffer.prototype.appendBuffer;
@@ -357,6 +380,7 @@
           window.dispatchEvent(new CustomEvent('__GARRETT_SOURCE_CHUNK__', {
             detail: {
               chunk,
+              mediaSourceId: this.__garrett_ms_id || null,
               byteLength: chunk.byteLength,
               timestamp: Date.now()
             }
@@ -469,14 +493,6 @@
       }
       if (!targetVideo && allVideos.length === 1) {
         targetVideo = allVideos[0];
-      }
-      if (!targetVideo) {
-        for (const v of allVideos) {
-          if (!v.paused || v.currentTime > 0) {
-            targetVideo = v;
-            break;
-          }
-        }
       }
 
       if (targetVideo) {
