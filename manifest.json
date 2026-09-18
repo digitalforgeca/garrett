@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Garrett — Stream Keeper",
   "version": "1.6.4",
-  "description": "Inspired by the Master Thief. Extracts, preserves, and keeps ephemeral video blobs and streams from fading into the shadows.",
+  "description": "Invisibly captures, stitches, and saves ephemeral blob video streams directly to complete MP4 files with sound.",
   "permissions": [
     "downloads",
     "activeTab",

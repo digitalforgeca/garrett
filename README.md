@@ -13,7 +13,7 @@
 
 Named after **Garrett**, the cynical, pragmatic Master Thief trained by the secretive **Keeper Order** (*Thief: The Dark Project*), this browser extension embodies the ancient Keeper philosophy:
 
-**The modern web treats video as disposable, ephemeral streams bound to `blob:` URLs and designed to vanish into the shadows. Garrett steps in to ensure that what is worth having is permanently and cleanly kept.**
+**Modern web platforms treat video as disposable, ephemeral streams bound to in-memory `blob:` URLs that disappear as soon as you scroll or close the tab. Garrett extracts, stitches, and preserves complete MP4 files directly to your machine.**
 
 ---
 
