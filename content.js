@@ -469,6 +469,18 @@
       };
     }
 
+    // Fast Path 0.5: Already cached manifest URL
+    if (state.manifestUrl) {
+      return {
+        url: state.manifestUrl,
+        manifestXml: state.manifestXml || '',
+        isStream: true,
+        format: state.manifestUrl.includes('.m3u8') ? 'HLS' : 'DASH',
+        streamKey: entityKey,
+        allSegments: []
+      };
+    }
+
     // Fast Path 1: Check React Stream Cache
     if (reactStreamCache.has(currentSrc)) {
       const rMeta = reactStreamCache.get(currentSrc);
@@ -743,6 +755,7 @@
           textEl.style.display = 'inline';
           textEl.textContent = `${pct}%`;
         }
+        safeSendMessage({ action: 'streamProgress', videoId: state.id, completed, total, pct });
       };
 
       const result = await assembler.downloadStream(streamUrl, onProgress, {
@@ -757,6 +770,7 @@
       if (saved) {
         showToast(`"What was taken is now safely kept." — Garrett (${filename})`, 6000);
       }
+      safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
 
       if (textEl) {
         textEl.style.display = 'inline';
@@ -818,6 +832,7 @@
           textEl.style.display = 'inline';
           textEl.textContent = `${pct}%`;
         }
+        safeSendMessage({ action: 'streamProgress', videoId: state.id, completed, total, pct });
       };
 
       const result = await assembler.assembleSegments(segmentUrls, 'video/mp4', 'mp4', onProgress, customFetchBuffer);
@@ -827,6 +842,7 @@
       if (saved) {
         showToast(`"What was taken is now safely kept." — Garrett (${filename})`, 6000);
       }
+      safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
 
       if (textEl) {
         textEl.style.display = 'inline';
@@ -1105,8 +1121,19 @@
       const state = Array.from(videoRegistry.values()).find(s => s.id === request.videoId) ||
                     Array.from(videoRegistry.values())[0];
       if (state) {
-        keepVideoNow(state);
-        sendResponse({ success: true });
+        if (request.streamUrl) {
+          if (request.streamUrl.includes('.mpd') || request.streamUrl.includes('/dash/') || request.streamUrl.includes('.m3u8')) {
+            state.manifestUrl = request.streamUrl;
+          } else if (request.streamUrl.endsWith('.mp4') || request.streamUrl.includes('/mp4-')) {
+            state.progressiveUrl = request.streamUrl;
+          }
+        }
+        if (request.manifestXml) {
+          state.manifestXml = request.manifestXml;
+        }
+        keepVideoNow(state)
+          .then((res) => sendResponse({ success: true, ...res }))
+          .catch((err) => sendResponse({ success: false, error: err.message }));
       } else {
         sendResponse({ success: false, error: 'Video not found' });
       }

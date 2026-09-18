@@ -201,6 +201,9 @@ body {
 }
 
 .download-btn.loading {
+  min-width: 52px;
+  width: auto;
+  padding: 0 8px;
   cursor: wait;
   border-color: #38bdf8;
   color: #38bdf8;

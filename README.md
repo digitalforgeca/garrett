@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Manifest_V3-Chrome_%7C_Brave-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Manifest V3" />
   <img src="https://img.shields.io/badge/JavaScript-ES2022-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black" alt="JavaScript" />
   <img src="https://img.shields.io/badge/Stream_Assembly-DASH_%26_HLS-D4AF37?style=for-the-badge" alt="Stream Assembly" />
-  <img src="https://img.shields.io/badge/Version-1.7.0-blue?style=for-the-badge" alt="Version 1.7.0" />
+  <img src="https://img.shields.io/badge/Version-1.7.1-blue?style=for-the-badge" alt="Version 1.7.1" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License MIT" />
 </p>
 

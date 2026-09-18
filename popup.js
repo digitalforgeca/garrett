@@ -17,6 +17,35 @@ document.addEventListener('DOMContentLoaded', () => {
     return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
   }
 
+  const customFetchText = async (u) => {
+    try {
+      const r = await fetch(u);
+      if (r.ok) return await r.text();
+      throw new Error(`HTTP ${r.status}`);
+    } catch (e) {
+      const bg = await chrome.runtime.sendMessage({ action: 'fetchText', url: u });
+      if (bg && bg.success && bg.text) return bg.text;
+      throw e;
+    }
+  };
+
+  const customFetchBuffer = async (u) => {
+    try {
+      const r = await fetch(u);
+      if (r.ok) return await r.arrayBuffer();
+      throw new Error(`HTTP ${r.status}`);
+    } catch (e) {
+      const bg = await chrome.runtime.sendMessage({ action: 'fetchBuffer', url: u });
+      if (bg && bg.success && bg.data) {
+        const bin = atob(bg.data);
+        const buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+        return buf.buffer;
+      }
+      throw e;
+    }
+  };
+
   async function getActiveTab() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     return tab;
@@ -219,57 +248,161 @@ document.addEventListener('DOMContentLoaded', () => {
     // Download action
     const dlBtn = card.querySelector('.download-btn');
     dlBtn.addEventListener('click', async () => {
+      if (dlBtn.disabled) return;
       dlBtn.disabled = true;
       dlBtn.classList.add('loading');
-      dlBtn.innerHTML = `
-        <svg class="spinning" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="12" y1="2" x2="12" y2="6"/>
-          <line x1="12" y1="18" x2="12" y2="22"/>
-          <line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/>
-          <line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/>
-          <line x1="2" y1="12" x2="6" y2="12"/>
-          <line x1="18" y1="12" x2="22" y2="12"/>
-          <line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/>
-          <line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/>
-        </svg>
-      `;
 
-      if (video.isNetworkFallback && video.streamUrl) {
-        chrome.runtime.sendMessage({
-          action: 'downloadUrl',
-          url: video.streamUrl,
-          filename: `video_${Date.now()}.mp4`
-        });
+      const updateDlStatus = (text, isSpinning = true) => {
+        dlBtn.innerHTML = `
+          <div style="display: inline-flex; align-items: center; gap: 4px; font-size: 10px; font-weight: 700; color: #38bdf8;">
+            ${isSpinning ? `<svg class="spinning" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="2" x2="12" y2="6"/>
+              <line x1="12" y1="18" x2="12" y2="22"/>
+              <line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/>
+              <line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/>
+              <line x1="2" y1="12" x2="6" y2="12"/>
+              <line x1="18" y1="12" x2="22" y2="12"/>
+              <line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/>
+              <line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/>
+            </svg>` : ''}
+            <span>${text}</span>
+          </div>
+        `;
+      };
+
+      const showSuccess = () => {
+        dlBtn.classList.remove('loading');
+        dlBtn.disabled = false;
+        dlBtn.title = 'Saved!';
         dlBtn.innerHTML = `
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="20 6 9 17 4 12"/>
           </svg>
         `;
-        setTimeout(() => { dlBtn.disabled = false; }, 3000);
-      } else {
+      };
+
+      const showError = (errMsg) => {
+        console.error('[Garrett] Download error:', errMsg);
+        dlBtn.disabled = false;
+        dlBtn.classList.remove('loading');
+        dlBtn.title = errMsg || 'Download error';
+        dlBtn.innerHTML = `
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="12"/>
+            <line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+        `;
+        setTimeout(() => {
+          dlBtn.title = 'Download video';
+          dlBtn.innerHTML = `
+            <svg class="dl-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+          `;
+        }, 3500);
+      };
+
+      updateDlStatus('0%');
+
+      // Listen for progress messages from content script
+      const progressListener = (msg) => {
+        if (msg.action === 'streamProgress' && (msg.videoId === video.id || !msg.videoId)) {
+          updateDlStatus(`${msg.pct}%`);
+        }
+        if (msg.action === 'streamCompleted' && (msg.videoId === video.id || !msg.videoId)) {
+          showSuccess();
+          chrome.runtime.onMessage.removeListener(progressListener);
+        }
+      };
+      chrome.runtime.onMessage.addListener(progressListener);
+
+      // 1. Try delegating to content script if available
+      let tabSuccess = false;
+      if (!video.isNetworkFallback && tabId) {
         try {
-          await chrome.tabs.sendMessage(tabId, {
+          const tabResp = await chrome.tabs.sendMessage(tabId, {
             action: 'harvestVideo',
-            videoId: video.id
+            videoId: video.id,
+            streamUrl: streamUrl,
+            format: streamFormat,
+            manifestXml: matchedStream?.manifestXml
           }, { frameId: video.frameId || 0 });
 
-          dlBtn.innerHTML = `
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="20 6 9 17 4 12"/>
-            </svg>
-          `;
-          setTimeout(() => { dlBtn.disabled = false; }, 3000);
+          if (tabResp && tabResp.success) {
+            tabSuccess = true;
+            showSuccess();
+            chrome.runtime.onMessage.removeListener(progressListener);
+            return;
+          }
+        } catch (e) {
+          console.warn('[Garrett] Tab harvest response:', e);
+        }
+      }
+
+      // 2. Direct Assembler in Popup (runs if tab didn't finish or fallback)
+      if (!tabSuccess) {
+        try {
+          const assembler = globalThis.GarrettStreamAssembler;
+          const targetUrl = streamUrl || (matchedStream && (matchedStream.manifestUrl || matchedStream.url)) || video.streamUrl || video.src;
+
+          if (!targetUrl || targetUrl.startsWith('blob:')) {
+            showError('Stream buffering: Play 2s of video first');
+            chrome.runtime.onMessage.removeListener(progressListener);
+            return;
+          }
+
+          // Direct Progressive MP4
+          if (targetUrl.endsWith('.mp4') || targetUrl.includes('/mp4-') || targetUrl.includes('mp4_')) {
+            updateDlStatus('Saving...', true);
+            chrome.runtime.sendMessage({
+              action: 'downloadUrl',
+              url: targetUrl,
+              filename: `video_${Date.now()}.mp4`
+            }, (resp) => {
+              if (resp && resp.success) showSuccess();
+              else showError((resp && resp.error) || 'Download failed');
+            });
+            chrome.runtime.onMessage.removeListener(progressListener);
+            return;
+          }
+
+          // DASH or HLS Manifest
+          if (targetUrl.includes('.mpd') || targetUrl.includes('/dash/') || targetUrl.includes('.m3u8')) {
+            updateDlStatus('0%');
+            const result = await assembler.downloadStream(targetUrl, (completed, total, pct) => {
+              updateDlStatus(`${pct}%`);
+            }, {
+              manifestText: matchedStream?.manifestXml,
+              customFetchText,
+              customFetchBuffer
+            });
+
+            updateDlStatus('Saving...', true);
+            const blobUrl = URL.createObjectURL(result.blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = blobUrl;
+            a.download = `video_${Date.now()}.${result.ext || 'mp4'}`;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+              a.remove();
+              URL.revokeObjectURL(blobUrl);
+            }, 30000);
+
+            showSuccess();
+            chrome.runtime.onMessage.removeListener(progressListener);
+            return;
+          }
+
+          showError('Unrecognized stream format');
         } catch (err) {
-          console.error('[Garrett] Download error:', err);
-          dlBtn.disabled = false;
-          dlBtn.classList.remove('loading');
-          dlBtn.innerHTML = `
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="12" y1="8" x2="12" y2="12"/>
-              <line x1="12" y1="16" x2="12.01" y2="16"/>
-            </svg>
-          `;
+          showError(err.message);
+        } finally {
+          chrome.runtime.onMessage.removeListener(progressListener);
         }
       }
     });
