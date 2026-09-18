@@ -74,17 +74,29 @@
     if (!item) return null;
     if (typeof item === 'string') return item;
     if (typeof item.url === 'string') return item.url;
+    if (typeof item.src === 'string') return item.src;
+    if (typeof item.manifestUrl === 'string') return item.manifestUrl;
+    if (typeof item.playbackUrl === 'string') return item.playbackUrl;
+    if (typeof item.masterPlaylistUrl === 'string') return item.masterPlaylistUrl;
     if (Array.isArray(item.streamingLocations)) {
       for (const loc of item.streamingLocations) {
         if (!loc) continue;
         if (typeof loc === 'string') return loc;
         if (typeof loc.url === 'string') return loc.url;
+        if (typeof loc.src === 'string') return loc.src;
+        if (typeof loc.masterPlaylistUrl === 'string') return loc.masterPlaylistUrl;
+        if (typeof loc.manifestUrl === 'string') return loc.manifestUrl;
+        if (typeof loc.playbackUrl === 'string') return loc.playbackUrl;
       }
     }
     const singleLoc = item.streamingLocation || item.location;
     if (singleLoc) {
       if (typeof singleLoc === 'string') return singleLoc;
       if (typeof singleLoc.url === 'string') return singleLoc.url;
+      if (typeof singleLoc.src === 'string') return singleLoc.src;
+      if (typeof singleLoc.masterPlaylistUrl === 'string') return singleLoc.masterPlaylistUrl;
+      if (typeof singleLoc.manifestUrl === 'string') return singleLoc.manifestUrl;
+      if (typeof singleLoc.playbackUrl === 'string') return singleLoc.playbackUrl;
     }
     return null;
   }
@@ -191,14 +203,27 @@
       discoveredManifestCache.push({ url: e.detail.url, text: e.detail.text || '', streamKey });
       if (discoveredManifestCache.length > 50) discoveredManifestCache.shift();
 
+      const isHls = e.detail.url.includes('.m3u8') || e.detail.url.includes('/hls/');
       for (const state of videoRegistry.values()) {
         if (!state.video || !state.video.isConnected) continue;
         const keyMatch = (state.mediaKey && entityKeysMatch(state.mediaKey, streamKey)) ||
-                         (state.allSegments && state.allSegments.some(s => streamUrlMatchesKey(s, streamKey)));
+                         (state.allSegments && state.allSegments.some(s => streamUrlMatchesKey(s, streamKey))) ||
+                         (state.allKeys && Array.from(state.allKeys).some(k => entityKeysMatch(k, streamKey)));
 
         if (keyMatch) {
-          state.manifestUrl = e.detail.url;
-          state.manifestXml = e.detail.text || '';
+          if (isHls) {
+            state.hlsUrl = e.detail.url;
+            state.manifestUrl = e.detail.url;
+            state.manifestXml = e.detail.text || '';
+          } else {
+            state.dashUrl = e.detail.url;
+            state.dashXml = e.detail.text || '';
+            // NEVER let DASH overwrite an existing HLS URL!
+            if (!state.hlsUrl && (!state.manifestUrl || !state.manifestUrl.includes('.m3u8'))) {
+              state.manifestUrl = e.detail.url;
+              state.manifestXml = e.detail.text || '';
+            }
+          }
           if (!state.mediaKey) state.mediaKey = streamKey;
         }
       }
@@ -289,8 +314,17 @@
           if (meta.progressiveUrl && !state.progressiveUrl) {
             state.progressiveUrl = meta.progressiveUrl;
           }
-          if (meta.manifestUrl && !state.manifestUrl) {
+          if (meta.hlsUrl) {
+            state.hlsUrl = meta.hlsUrl;
+            state.manifestUrl = meta.hlsUrl;
+          } else if (meta.manifestUrl && (meta.manifestUrl.includes('.m3u8') || meta.manifestUrl.includes('/hls/'))) {
+            state.hlsUrl = meta.manifestUrl;
             state.manifestUrl = meta.manifestUrl;
+          } else if (meta.dashUrl || meta.manifestUrl) {
+            state.dashUrl = meta.dashUrl || meta.manifestUrl;
+            if (!state.hlsUrl && (!state.manifestUrl || !state.manifestUrl.includes('.m3u8'))) {
+              state.manifestUrl = state.dashUrl;
+            }
           }
           if (meta.duration && meta.duration > 0 && (!state.duration || state.duration <= 5)) {
             state.duration = meta.duration;
@@ -315,10 +349,22 @@
         const v = state.video;
         if (!v || !v.isConnected) continue;
         const matchesVideo = (e.detail.videoId && state.id === e.detail.videoId) ||
-                             (e.detail.blobUrl && (v.currentSrc === e.detail.blobUrl || v.src === e.detail.blobUrl));
+                             (e.detail.blobUrl && (v.currentSrc === e.detail.blobUrl || v.src === e.detail.blobUrl)) ||
+                             (e.detail.mediaKey && state.mediaKey && entityKeysMatch(state.mediaKey, e.detail.mediaKey));
         if (matchesVideo) {
           if (e.detail.progressiveUrl) state.progressiveUrl = e.detail.progressiveUrl;
-          if (e.detail.manifestUrl) state.manifestUrl = e.detail.manifestUrl;
+          if (e.detail.hlsUrl) {
+            state.hlsUrl = e.detail.hlsUrl;
+            state.manifestUrl = e.detail.hlsUrl;
+          } else if (e.detail.manifestUrl && (e.detail.manifestUrl.includes('.m3u8') || e.detail.manifestUrl.includes('/hls/'))) {
+            state.hlsUrl = e.detail.manifestUrl;
+            state.manifestUrl = e.detail.manifestUrl;
+          } else if (e.detail.dashUrl || e.detail.manifestUrl) {
+            state.dashUrl = e.detail.dashUrl || e.detail.manifestUrl;
+            if (!state.hlsUrl && (!state.manifestUrl || !state.manifestUrl.includes('.m3u8'))) {
+              state.manifestUrl = state.dashUrl;
+            }
+          }
           if (e.detail.mediaKey && !state.mediaKey) state.mediaKey = e.detail.mediaKey;
           if (e.detail.activityUrn && !state.activityUrn) state.activityUrn = e.detail.activityUrn;
           if (e.detail.duration && (!state.duration || state.duration <= 5)) {
@@ -680,12 +726,23 @@
       return true;
     }
 
-    // 3. Match by active blob URL
+    // 3. Match across all collected keys and URNs
+    if (videoState.allKeys && videoState.allKeys.size > 0) {
+      if (meta.mediaKey && Array.from(videoState.allKeys).some(k => entityKeysMatch(k, meta.mediaKey))) return true;
+      if (meta.activityUrn && Array.from(videoState.allKeys).some(k => entityKeysMatch(k, meta.activityUrn))) return true;
+      if (meta.allKeys && Array.isArray(meta.allKeys)) {
+        for (const mk of meta.allKeys) {
+          if (Array.from(videoState.allKeys).some(k => entityKeysMatch(k, mk))) return true;
+        }
+      }
+    }
+
+    // 4. Match by active blob URL
     if (videoState.currentBlobUrl && meta.blobUrl && videoState.currentBlobUrl === meta.blobUrl) {
       return true;
     }
 
-    // 4. Match by stream key in captured segments
+    // 5. Match by stream key in captured segments
     if (videoState.allSegments && videoState.allSegments.length > 0 && meta.mediaKey) {
       if (videoState.allSegments.some(s => streamUrlMatchesKey(s, meta.mediaKey))) {
         return true;
@@ -805,13 +862,22 @@
             if (!s) continue;
             const u = extractMediaUrlFromItem(s);
             if (!u) continue;
-            const proto = String(s.protocol || '').toUpperCase();
-            if (proto === 'HLS' || u.includes('.m3u8') || u.includes('/hls/')) {
+            const proto = String(s.protocol || s.streamType || s.protocolType || s.format || s.type || '').toUpperCase();
+            if (proto.includes('HLS') || u.includes('.m3u8') || u.includes('/hls/')) {
               if (!hlsUrl) hlsUrl = u;
-            } else if (proto === 'DASH' || u.includes('/dash/') || u.includes('.mpd')) {
+            } else if (proto.includes('DASH') || u.includes('/dash/') || u.includes('.mpd')) {
               if (!dashUrl) dashUrl = u;
             }
             if (!mediaKey) mediaKey = extractStreamKey(u);
+          }
+
+          if (!hlsUrl) {
+            const candHls = vpm.masterPlaylistUrl || vpm.hlsUrl || vpm.adaptiveHlsUrl || parent.masterPlaylistUrl || parent.hlsUrl || parent.adaptiveHlsUrl;
+            if (candHls) hlsUrl = extractMediaUrlFromItem(candHls);
+          }
+          if (!dashUrl) {
+            const candDash = vpm.dashUrl || vpm.adaptiveDashUrl || parent.dashUrl || parent.adaptiveDashUrl;
+            if (candDash) dashUrl = extractMediaUrlFromItem(candDash);
           }
 
           const dur = vpm.duration ? (vpm.duration > 1000 ? vpm.duration / 1000 : vpm.duration) : 0;
@@ -841,6 +907,9 @@
     const curSrc = newSrc || (state.video ? (state.video.currentSrc || state.video.src || '') : '');
     state.currentBlobUrl = curSrc;
     state.progressiveUrl = null;
+    state.hlsUrl = null;
+    state.dashUrl = null;
+    state.dashXml = null;
     state.manifestUrl = null;
     state.manifestXml = null;
     state.allSegments = [];
@@ -894,7 +963,18 @@
           for (const m of allMeta) {
             if (matchesVideoMetadata(existingState, m)) {
               if (m.progressiveUrl) existingState.progressiveUrl = m.progressiveUrl;
-              if (m.manifestUrl) existingState.manifestUrl = m.manifestUrl;
+              if (m.hlsUrl) {
+                existingState.hlsUrl = m.hlsUrl;
+                existingState.manifestUrl = m.hlsUrl;
+              } else if (m.manifestUrl && (m.manifestUrl.includes('.m3u8') || m.manifestUrl.includes('/hls/'))) {
+                existingState.hlsUrl = m.manifestUrl;
+                existingState.manifestUrl = m.manifestUrl;
+              } else if (m.dashUrl || m.manifestUrl) {
+                existingState.dashUrl = m.dashUrl || m.manifestUrl;
+                if (!existingState.hlsUrl && (!existingState.manifestUrl || !existingState.manifestUrl.includes('.m3u8'))) {
+                  existingState.manifestUrl = existingState.dashUrl;
+                }
+              }
               if (m.mediaKey) existingState.mediaKey = m.mediaKey;
               if (m.duration && m.duration > 0 && (!existingState.duration || existingState.duration <= 5)) existingState.duration = m.duration;
               if (m.progressiveUrl) break;
@@ -942,6 +1022,9 @@
       poster,
       currentBlobUrl: video.currentSrc || video.src || '',
       progressiveUrl: null,
+      hlsUrl: null,
+      dashUrl: null,
+      dashXml: null,
       manifestUrl: null,
       manifestXml: null,
       allSegments: [],
@@ -956,7 +1039,18 @@
       for (const m of allMeta) {
         if (matchesVideoMetadata(state, m)) {
           if (m.progressiveUrl) state.progressiveUrl = m.progressiveUrl;
-          if (m.manifestUrl) state.manifestUrl = m.manifestUrl;
+          if (m.hlsUrl) {
+            state.hlsUrl = m.hlsUrl;
+            state.manifestUrl = m.hlsUrl;
+          } else if (m.manifestUrl && (m.manifestUrl.includes('.m3u8') || m.manifestUrl.includes('/hls/'))) {
+            state.hlsUrl = m.manifestUrl;
+            state.manifestUrl = m.manifestUrl;
+          } else if (m.dashUrl || m.manifestUrl) {
+            state.dashUrl = m.dashUrl || m.manifestUrl;
+            if (!state.hlsUrl && (!state.manifestUrl || !state.manifestUrl.includes('.m3u8'))) {
+              state.manifestUrl = state.dashUrl;
+            }
+          }
           if (m.mediaKey) state.mediaKey = m.mediaKey;
           if (m.duration && m.duration > 0 && (!state.duration || state.duration <= 5)) state.duration = m.duration;
           if (m.mediaKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
@@ -1205,7 +1299,21 @@
           streamKey: rMetaFast.mediaKey || state.mediaKey || entityKey
         };
       }
+      const fastHls = rMetaFast.hlsUrl || ((rMetaFast.manifestUrl && (rMetaFast.manifestUrl.includes('.m3u8') || rMetaFast.manifestUrl.includes('/hls/'))) ? rMetaFast.manifestUrl : null);
+      if (fastHls) {
+        state.hlsUrl = fastHls;
+        state.manifestUrl = fastHls;
+        return {
+          url: fastHls,
+          manifestXml: '',
+          isStream: true,
+          format: 'HLS',
+          streamKey: rMetaFast.mediaKey || state.mediaKey || entityKey,
+          allSegments: []
+        };
+      }
       if (rMetaFast.manifestUrl && !state.manifestUrl) {
+        state.dashUrl = rMetaFast.manifestUrl;
         state.manifestUrl = rMetaFast.manifestUrl;
       }
     }
@@ -1229,7 +1337,21 @@
               streamKey: m.mediaKey || state.mediaKey || state.entityKey
             };
           }
+          const candHls = m.hlsUrl || ((m.manifestUrl && (m.manifestUrl.includes('.m3u8') || m.manifestUrl.includes('/hls/'))) ? m.manifestUrl : null);
+          if (candHls) {
+            state.hlsUrl = candHls;
+            state.manifestUrl = candHls;
+            return {
+              url: candHls,
+              manifestXml: '',
+              isStream: true,
+              format: 'HLS',
+              streamKey: m.mediaKey || state.mediaKey || state.entityKey,
+              allSegments: []
+            };
+          }
           if (m.manifestUrl && !state.manifestUrl) {
+            state.dashUrl = m.manifestUrl;
             state.manifestUrl = m.manifestUrl;
           }
         }
@@ -1266,7 +1388,21 @@
             streamKey: rMetaAsync.mediaKey || state.mediaKey || state.entityKey
           };
         }
+        const asyncHls = rMetaAsync.hlsUrl || ((rMetaAsync.manifestUrl && (rMetaAsync.manifestUrl.includes('.m3u8') || rMetaAsync.manifestUrl.includes('/hls/'))) ? rMetaAsync.manifestUrl : null);
+        if (asyncHls) {
+          state.hlsUrl = asyncHls;
+          state.manifestUrl = asyncHls;
+          return {
+            url: asyncHls,
+            manifestXml: '',
+            isStream: true,
+            format: 'HLS',
+            streamKey: rMetaAsync.mediaKey || state.mediaKey || state.entityKey,
+            allSegments: []
+          };
+        }
         if (rMetaAsync.manifestUrl && !state.manifestUrl) {
+          state.dashUrl = rMetaAsync.manifestUrl;
           state.manifestUrl = rMetaAsync.manifestUrl;
         }
       }
@@ -1315,9 +1451,11 @@
               !name.includes('.m4s') && !name.includes('.ts') && !name.includes('.init') && !name.includes('/init') && !/\/[0-9]+\/[0-9]+(?:\?|$)/.test(name);
             if (isHls) {
               if (queue) queue.registerManifest(name);
+              state.hlsUrl = name;
               state.manifestUrl = name;
-            } else if (!state.manifestUrl && isDash) {
+            } else if (!state.hlsUrl && (!state.manifestUrl || !state.manifestUrl.includes('.m3u8')) && isDash) {
               if (queue) queue.registerManifest(name);
+              state.dashUrl = name;
               state.manifestUrl = name;
             }
           }
@@ -1420,13 +1558,15 @@
       await new Promise(r => setTimeout(r, 150));
     }
 
-    // Return manifest if locked
-    if (state.manifestUrl) {
+    // Return manifest if locked (prioritizing HLS)
+    const finalManifest = state.hlsUrl || state.manifestUrl;
+    if (finalManifest) {
+      const isHls = finalManifest.includes('.m3u8') || finalManifest.includes('/hls/');
       return {
-        url: state.manifestUrl,
-        manifestXml: state.manifestXml || '',
+        url: finalManifest,
+        manifestXml: (!isHls ? state.dashXml : '') || '',
         isStream: true,
-        format: state.manifestUrl.includes('.m3u8') ? 'HLS' : 'DASH',
+        format: isHls ? 'HLS' : 'DASH',
         streamKey: state.entityKey,
         allSegments: state.allSegments || []
       };
@@ -1891,18 +2031,26 @@
       }
 
       // Path 2: Full Manifest Stream (DASH or HLS assembled)
-      let manifestUrl = (stream && stream.url) || state.manifestUrl;
-      let manifestXml = (stream && stream.manifestXml) || state.manifestXml || '';
+      let manifestUrl = state.hlsUrl || (stream && stream.format === 'HLS' ? stream.url : null) || (stream && stream.url) || state.manifestUrl;
+      let manifestXml = (manifestUrl === state.dashUrl ? (stream && stream.manifestXml) || state.manifestXml : '') || '';
 
       // If manifest URL was not yet set, check discoveredManifestCache first, then performance resource entries
       if (!manifestUrl && state.mediaKey) {
         for (const mf of discoveredManifestCache) {
           if (entityKeysMatch(state.mediaKey, mf.streamKey)) {
-            manifestUrl = mf.url;
-            manifestXml = mf.text;
-            state.manifestUrl = mf.url;
-            state.manifestXml = mf.text;
-            break;
+            const isMfHls = mf.url.includes('.m3u8') || mf.url.includes('/hls/');
+            if (isMfHls) {
+              manifestUrl = mf.url;
+              manifestXml = mf.text;
+              state.hlsUrl = mf.url;
+              state.manifestUrl = mf.url;
+              break;
+            } else if (!manifestUrl) {
+              manifestUrl = mf.url;
+              manifestXml = mf.text;
+              state.dashUrl = mf.url;
+              state.manifestUrl = mf.url;
+            }
           }
         }
       }
@@ -1912,15 +2060,24 @@
           if (!segKey) continue;
           for (const mf of discoveredManifestCache) {
             if (entityKeysMatch(segKey, mf.streamKey)) {
-              manifestUrl = mf.url;
-              manifestXml = mf.text;
-              state.manifestUrl = mf.url;
-              state.manifestXml = mf.text;
-              if (!state.mediaKey) state.mediaKey = segKey;
-              break;
+              const isMfHls = mf.url.includes('.m3u8') || mf.url.includes('/hls/');
+              if (isMfHls) {
+                manifestUrl = mf.url;
+                manifestXml = mf.text;
+                state.hlsUrl = mf.url;
+                state.manifestUrl = mf.url;
+                if (!state.mediaKey) state.mediaKey = segKey;
+                break;
+              } else if (!manifestUrl) {
+                manifestUrl = mf.url;
+                manifestXml = mf.text;
+                state.dashUrl = mf.url;
+                state.manifestUrl = mf.url;
+                if (!state.mediaKey) state.mediaKey = segKey;
+              }
             }
           }
-          if (manifestUrl) break;
+          if (manifestUrl && (manifestUrl.includes('.m3u8') || manifestUrl.includes('/hls/'))) break;
         }
       }
 
@@ -1939,14 +2096,41 @@
 
               const nameKey = extractStreamKey(name);
               if (nameKey && entityKeysMatch(state.mediaKey, nameKey)) {
-                manifestUrl = name;
-                state.manifestUrl = name;
-                if (queue) queue.registerManifest(name);
-                if (isHls) break;
+                if (isHls) {
+                  manifestUrl = name;
+                  state.hlsUrl = name;
+                  state.manifestUrl = name;
+                  if (queue) queue.registerManifest(name);
+                  break;
+                } else if (!manifestUrl && !state.hlsUrl) {
+                  manifestUrl = name;
+                  state.dashUrl = name;
+                  state.manifestUrl = name;
+                  if (queue) queue.registerManifest(name);
+                }
               }
             }
           }
         } catch (e) {}
+      }
+
+      // If manifest is DASH, attempt an automated HLS probe before downloading
+      if (manifestUrl && (manifestUrl.includes('.mpd') || manifestUrl.includes('/dash/')) && !state.hlsUrl) {
+        try {
+          const hlsProbeUrl = manifestUrl
+            .replace(/\/dash\/[^\/]+\/manifest\.mpd/i, '/hls/master.m3u8')
+            .replace(/\/dash\/manifest\.mpd/i, '/hls/master.m3u8');
+          if (hlsProbeUrl !== manifestUrl) {
+            const probeText = await customFetchText(hlsProbeUrl);
+            if (probeText && probeText.includes('#EXTM3U')) {
+              console.log('[Garrett] Auto-upgraded DASH manifest to complete HLS VOD playlist:', hlsProbeUrl);
+              manifestUrl = hlsProbeUrl;
+              manifestXml = probeText;
+              state.hlsUrl = hlsProbeUrl;
+              state.manifestUrl = hlsProbeUrl;
+            }
+          }
+        } catch (probeErr) {}
       }
 
       if (manifestUrl) {
@@ -2220,6 +2404,26 @@
     if (request.action === 'streamDiscovered' && request.stream) {
       if (queue && request.stream.url) {
         queue.registerManifest(request.stream.url, '', request.stream);
+      }
+      const streamUrl = request.stream.url;
+      if (streamUrl) {
+        const streamKey = extractStreamKey(streamUrl);
+        const isHls = streamUrl.includes('.m3u8') || streamUrl.includes('/hls/');
+        for (const state of videoRegistry.values()) {
+          const matches = (streamKey && state.mediaKey && entityKeysMatch(state.mediaKey, streamKey)) ||
+                          (streamKey && state.allKeys && Array.from(state.allKeys).some(k => entityKeysMatch(k, streamKey)));
+          if (matches) {
+            if (isHls) {
+              state.hlsUrl = streamUrl;
+              state.manifestUrl = streamUrl;
+            } else {
+              state.dashUrl = streamUrl;
+              if (!state.hlsUrl && (!state.manifestUrl || !state.manifestUrl.includes('.m3u8'))) {
+                state.manifestUrl = streamUrl;
+              }
+            }
+          }
+        }
       }
       sendResponse({ received: true });
       return true;

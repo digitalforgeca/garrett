@@ -403,8 +403,26 @@
     });
 
     let text = options.manifestText;
-    const isHlsUrl = manifestUrl.includes('.m3u8') || manifestUrl.includes('/hls/');
+    let isHlsUrl = manifestUrl.includes('.m3u8') || manifestUrl.includes('/hls/');
     const isDashUrl = manifestUrl.includes('.mpd') || manifestUrl.includes('/dash/');
+
+    // If manifest URL is DASH, attempt automated HLS master playlist probe
+    if (isDashUrl && !isHlsUrl) {
+      try {
+        const hlsProbeUrl = manifestUrl
+          .replace(/\/dash\/[^\/]+\/manifest\.mpd/i, '/hls/master.m3u8')
+          .replace(/\/dash\/manifest\.mpd/i, '/hls/master.m3u8');
+        if (hlsProbeUrl !== manifestUrl) {
+          const probeText = await fetchText(hlsProbeUrl);
+          if (probeText && probeText.includes('#EXTM3U')) {
+            manifestUrl = hlsProbeUrl;
+            text = probeText;
+            isHlsUrl = true;
+          }
+        }
+      } catch (probeErr) {}
+    }
+
     if (!text || (isHlsUrl && text.includes('<MPD')) || (isDashUrl && text.includes('#EXTM3U'))) {
       text = await fetchText(manifestUrl);
     }

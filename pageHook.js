@@ -114,6 +114,9 @@
         if (typeof loc === 'string') return loc;
         if (typeof loc.url === 'string') return loc.url;
         if (typeof loc.src === 'string') return loc.src;
+        if (typeof loc.masterPlaylistUrl === 'string') return loc.masterPlaylistUrl;
+        if (typeof loc.manifestUrl === 'string') return loc.manifestUrl;
+        if (typeof loc.playbackUrl === 'string') return loc.playbackUrl;
       }
     }
     const singleLoc = item.streamingLocation || item.location;
@@ -121,6 +124,9 @@
       if (typeof singleLoc === 'string') return singleLoc;
       if (typeof singleLoc.url === 'string') return singleLoc.url;
       if (typeof singleLoc.src === 'string') return singleLoc.src;
+      if (typeof singleLoc.masterPlaylistUrl === 'string') return singleLoc.masterPlaylistUrl;
+      if (typeof singleLoc.manifestUrl === 'string') return singleLoc.manifestUrl;
+      if (typeof singleLoc.playbackUrl === 'string') return singleLoc.playbackUrl;
     }
     return null;
   }
@@ -156,13 +162,22 @@
         if (!s) continue;
         const u = extractMediaUrlFromItem(s);
         if (!u) continue;
-        const proto = String(s.protocol || '').toUpperCase();
-        if (proto === 'DASH' || u.includes('/dash/') || u.includes('.mpd')) {
-          if (!dashUrl) dashUrl = u;
-        } else if (proto === 'HLS' || u.includes('.m3u8') || u.includes('/hls/')) {
+        const proto = String(s.protocol || s.streamType || s.protocolType || s.format || s.type || '').toUpperCase();
+        if (proto.includes('HLS') || u.includes('.m3u8') || u.includes('/hls/')) {
           if (!hlsUrl) hlsUrl = u;
+        } else if (proto.includes('DASH') || u.includes('/dash/') || u.includes('.mpd')) {
+          if (!dashUrl) dashUrl = u;
         }
       }
+    }
+
+    if (!hlsUrl) {
+      const candHls = vpm.masterPlaylistUrl || vpm.hlsUrl || vpm.adaptiveHlsUrl || metaObj.masterPlaylistUrl || metaObj.hlsUrl || metaObj.adaptiveHlsUrl;
+      if (candHls) hlsUrl = extractMediaUrlFromItem(candHls);
+    }
+    if (!dashUrl) {
+      const candDash = vpm.dashUrl || vpm.adaptiveDashUrl || metaObj.dashUrl || metaObj.adaptiveDashUrl;
+      if (candDash) dashUrl = extractMediaUrlFromItem(candDash);
     }
 
     const manifestUrl = hlsUrl || dashUrl || (typeof vpm.manifestUrl === 'string' ? vpm.manifestUrl : null);
@@ -250,10 +265,10 @@
         collected.push({ parent: node, vpm: node, activityUrn: actUrn });
       }
       if (Array.isArray(node)) {
-        for (let i = 0; i < node.length && i < 100; i++) scan(node[i], depth + 1, actUrn);
+        for (let i = 0; i < node.length && i < 1000; i++) scan(node[i], depth + 1, actUrn);
       } else {
         const keys = Object.keys(node);
-        for (let i = 0; i < keys.length && i < 60; i++) {
+        for (let i = 0; i < keys.length && i < 250; i++) {
           const k = keys[i];
           if (k === 'videoPlayMetadata') continue;
           scan(node[k], depth + 1, actUrn);
