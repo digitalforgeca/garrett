@@ -421,14 +421,118 @@
   }
 
   /**
+   * Analyze segment URL structure to detect CDN format, sequence index, and query tokens.
+   */
+  function analyzeSegmentUrlPattern(url) {
+    if (!url || typeof url !== 'string') return null;
+    const [basePath, query] = url.split('?');
+    const qStr = query ? `?${query}` : '';
+
+    // 1. LinkedIn DASH: /segment/<repId>/<seqNumber>
+    const mSeg = basePath.match(/^(.*\/segment\/[^\/]+\/)(\d+)$/i);
+    if (mSeg) {
+      const prefix = mSeg[1];
+      const num = parseInt(mSeg[2], 10);
+      return {
+        type: 'segment_num',
+        generateUrl: (n) => `${prefix}${n}${qStr}`,
+        initUrl: `${prefix}init${qStr}`,
+        currentIndex: num,
+        startIndex: 0
+      };
+    }
+
+    // 2. LinkedIn DASH: /<repId>/<seqNumber>/<timestamp>
+    const mLi = basePath.match(/^(.*\/)([0-9]+)\/([0-9]+)$/);
+    if (mLi) {
+      const prefix = mLi[1];
+      const seq = parseInt(mLi[2], 10);
+      const ts = parseInt(mLi[3], 10);
+      const deltaTs = seq > 0 ? Math.round(ts / seq) : 2000;
+      return {
+        type: 'seq_timestamp',
+        generateUrl: (n) => `${prefix}${n}/${n * deltaTs}${qStr}`,
+        initUrl: `${prefix}init${qStr}`,
+        currentIndex: seq,
+        startIndex: 0,
+        deltaTs
+      };
+    }
+
+    // 3. HLS TS: /<num>.ts
+    const mTs = basePath.match(/^(.*\/)(\d+)\.ts$/i);
+    if (mTs) {
+      const prefix = mTs[1];
+      const num = parseInt(mTs[2], 10);
+      const pad = mTs[2].length > 1 && mTs[2].startsWith('0') ? mTs[2].length : 0;
+      return {
+        type: 'hls_ts',
+        generateUrl: (n) => `${prefix}${pad ? String(n).padStart(pad, '0') : n}.ts${qStr}`,
+        initUrl: null,
+        currentIndex: num,
+        startIndex: 0
+      };
+    }
+
+    // 4. Fragmented MP4: chunk-stream-00001.m4s or seg-1.m4s
+    const mM4s = basePath.match(/^(.*[_-])(\d+)(\.m4s)$/i);
+    if (mM4s) {
+      const prefix = mM4s[1];
+      const numStr = mM4s[2];
+      const suffix = mM4s[3];
+      const pad = numStr.length > 1 && numStr.startsWith('0') ? numStr.length : 0;
+      const num = parseInt(numStr, 10);
+      return {
+        type: 'chunk_m4s',
+        generateUrl: (n) => `${prefix}${pad ? String(n).padStart(pad, '0') : n}${suffix}${qStr}`,
+        initUrl: `${prefix}init${suffix}${qStr}`,
+        currentIndex: num,
+        startIndex: 1
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Synthesizes the full sequence of segment URLs for a stream up to targetDurationSeconds.
+   */
+  function synthesizeSegmentUrls(sampleUrl, targetDurationSeconds = 0, options = {}) {
+    const pattern = analyzeSegmentUrlPattern(sampleUrl);
+    if (!pattern) return null;
+
+    const segDuration = options.segmentDuration || (pattern.deltaTs ? pattern.deltaTs / 1000 : 2.0);
+    const expectedCount = targetDurationSeconds > 0
+      ? Math.max(Math.ceil(targetDurationSeconds / segDuration) + 1, 6)
+      : Math.max(pattern.currentIndex + 8, 15);
+
+    const urls = [];
+    if (pattern.initUrl && options.includeInit !== false) {
+      urls.push(pattern.initUrl);
+    }
+
+    for (let i = pattern.startIndex; i < pattern.startIndex + expectedCount; i++) {
+      urls.push(pattern.generateUrl(i));
+    }
+
+    return {
+      urls,
+      pattern,
+      segDuration,
+      initUrl: pattern.initUrl
+    };
+  }
+
+  /**
    * Parallel segment downloader and memory assembler
    */
-  async function assembleSegments(allUrls, mimeType, ext, onProgress, fetchBuffer) {
+  async function assembleSegments(allUrls, mimeType, ext, onProgress, fetchBuffer, options = {}) {
     const total = allUrls.length;
     let completed = 0;
     const buffers = new Array(total);
     const concurrency = Math.min(6, total);
     let currentIndex = 0;
+    const allowTrailingLoss = options.allowTrailingLoss !== false;
 
     async function worker() {
       while (currentIndex < total) {
@@ -443,11 +547,22 @@
             buffers[idx] = await fetchBuffer(url);
             success = true;
           } catch (err) {
+            const is404 = err && err.message && (err.message.includes('404') || err.message.includes('410'));
+            // If trailing segment (past index 2) returns 404, stream reached EOF
+            if (is404 && allowTrailingLoss && idx > 2) {
+              buffers[idx] = null;
+              break;
+            }
             if (attempts >= 3) {
+              if (allowTrailingLoss && idx > 2) {
+                console.warn(`Trailing segment ${idx + 1}/${total} not available (${err.message}), stopping stream.`);
+                buffers[idx] = null;
+                break;
+              }
               console.error(`Failed segment ${idx + 1}/${total} (${url}):`, err);
               throw new Error(`Failed segment ${idx + 1}/${total}: ${err.message}`);
             }
-            await new Promise(r => setTimeout(r, 400 * attempts));
+            await new Promise(r => setTimeout(r, 350 * attempts));
           }
         }
 
@@ -462,19 +577,32 @@
     const workers = Array.from({ length: concurrency }, () => worker());
     await Promise.all(workers);
 
-    const blob = new Blob(buffers, { type: mimeType });
+    // Filter out trailing null buffers if stream reached end
+    const validBuffers = [];
+    for (let i = 0; i < total; i++) {
+      if (buffers[i]) {
+        validBuffers.push(buffers[i]);
+      } else {
+        // First null signifies EOF; drop everything after
+        break;
+      }
+    }
+
+    const blob = new Blob(validBuffers, { type: mimeType });
 
     if (blob.size < 32768) {
       throw new Error(`Assembled stream file is suspiciously small (${blob.size} bytes).`);
     }
 
-    return { blob, ext, totalBytes: blob.size, totalSegments: total };
+    return { blob, ext, totalBytes: blob.size, totalSegments: validBuffers.length };
   }
 
   return {
     parseM3U8,
     parseDashMpd,
     downloadStream,
-    assembleSegments
+    assembleSegments,
+    analyzeSegmentUrlPattern,
+    synthesizeSegmentUrls
   };
 });

@@ -206,6 +206,7 @@
       if (resA !== resB) return resB - resA;
       return (b.bitRate || 0) - (a.bitRate || 0);
     });
+    const best = sorted[0];
     const loc = best?.streamingLocations?.[0]?.url ||
                 (typeof best?.streamingLocations?.[0] === 'string' ? best.streamingLocations[0] : null) ||
                 best?.url;
@@ -274,23 +275,29 @@
       d++;
     }
 
-    // 2. Direct Fiber Walk: Ascend parent component tree via fiber.return
-    const fiberKey = Object.keys(element).find(k => k.startsWith('__reactFiber$'));
-    if (fiberKey && element[fiberKey]) {
-      let fiber = element[fiberKey];
-      let fCount = 0;
-      while (fiber && fCount < 40) {
-        if (fiber.memoizedProps) {
-          const meta = inspectObjectForVideo(fiber.memoizedProps, 0);
-          if (meta) return meta;
+    // 2. Direct Fiber Walk: Ascend element and parent component tree via fiber.return
+    let fiberNode = element;
+    let fDepth = 0;
+    while (fiberNode && fDepth < 10) {
+      const fiberKey = Object.keys(fiberNode).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+      if (fiberKey && fiberNode[fiberKey]) {
+        let fiber = fiberNode[fiberKey];
+        let fCount = 0;
+        while (fiber && fCount < 50) {
+          if (fiber.memoizedProps) {
+            const meta = inspectObjectForVideo(fiber.memoizedProps, 0);
+            if (meta) return meta;
+          }
+          if (fiber.memoizedState) {
+            const meta = inspectObjectForVideo(fiber.memoizedState, 0);
+            if (meta) return meta;
+          }
+          fiber = fiber.return;
+          fCount++;
         }
-        if (fiber.memoizedState) {
-          const meta = inspectObjectForVideo(fiber.memoizedState, 0);
-          if (meta) return meta;
-        }
-        fiber = fiber.return;
-        fCount++;
       }
+      fiberNode = fiberNode.parentElement;
+      fDepth++;
     }
 
     return null;

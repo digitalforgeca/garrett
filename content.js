@@ -381,24 +381,34 @@
    * Scrapes visible player timer text from DOM to determine ground-truth duration,
    * bypassing MSE buffered window limitations (e.g. 4.0s).
    */
+  /**
+   * Scrapes visible player timer text from DOM to determine ground-truth duration,
+   * bypassing MSE buffered window limitations (e.g. 4.0s).
+   */
   function extractVideoDurationFromDom(video) {
     if (!video) return 0;
     try {
       const container = video.closest('.feed-shared-update-v2, [data-urn], [data-id], article, .feed-shared-linkedin-video, div[data-id], .occludable-update') || video.parentElement;
       if (!container) return 0;
-      const candidates = container.querySelectorAll('time, span, div, p, [aria-label*="duration"], [class*="duration"], [class*="time"]');
+      const candidates = container.querySelectorAll('time, span, div, p, [aria-label*="duration"], [class*="duration"], [class*="time"], [aria-label*="time"]');
+      let maxSec = 0;
       for (const el of candidates) {
-        const text = (el.textContent || '').trim();
-        if (text.length > 12) continue;
-        const m = text.match(/\b(?:(\d+):)?(\d+):(\d{2})\b/);
-        if (m) {
+        let text = (el.textContent || '').trim();
+        if (text.length > 25) continue;
+        if (text.includes('/')) {
+          const parts = text.split('/');
+          text = parts[parts.length - 1].trim();
+        }
+        const matches = [...text.matchAll(/\b(?:(\d+):)?(\d+):(\d{2})\b/g)];
+        for (const m of matches) {
           const hours = m[1] ? parseInt(m[1], 10) : 0;
           const mins = parseInt(m[2], 10);
           const secs = parseInt(m[3], 10);
           const total = hours * 3600 + mins * 60 + secs;
-          if (total > 3) return total;
+          if (total > maxSec) maxSec = total;
         }
       }
+      if (maxSec > 3) return maxSec;
     } catch (e) {}
     return 0;
   }
@@ -423,7 +433,7 @@
 
   function matchesVideoMetadata(videoState, meta) {
     if (!meta) return false;
-    if (videoRegistry.size === 1) return true;
+    if (videoRegistry.size <= 1) return true;
 
     const targetKeys = [
       videoState.entityKey,
@@ -703,7 +713,15 @@
   async function resolveStreamForVideo(state, maxWaitMs = 2500) {
     const video = state.video;
     const currentSrc = video ? (video.currentSrc || video.src || '') : '';
-    const entityKey = state.entityKey || (video ? extractVideoEntityKeyFromDom(video) : '');
+    const domInfo = extractVideoEntityInfoFromDom(video);
+    if (domInfo.mediaKey && !state.mediaKey) state.mediaKey = domInfo.mediaKey;
+    if (domInfo.primaryKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
+      state.entityKey = domInfo.primaryKey;
+    }
+    if (domInfo.allKeys && state.allKeys) {
+      for (const k of domInfo.allKeys) state.allKeys.add(k);
+    }
+    const entityKey = state.mediaKey || state.entityKey;
     state.entityKey = entityKey;
     const duration = resolveRealVideoDuration(state);
 
@@ -715,6 +733,13 @@
         format: 'DIRECT',
         streamKey: state.mediaKey || entityKey
       };
+    }
+
+    // Trigger immediate React Fiber query
+    if (currentSrc.startsWith('blob:') || !state.progressiveUrl) {
+      window.dispatchEvent(new CustomEvent('__GARRETT_QUERY_REACT_STREAM__', {
+        detail: { videoId: state.id, blobUrl: currentSrc }
+      }));
     }
 
     // Fast Path 1: Check React Stream Cache
@@ -742,7 +767,7 @@
       const allMeta = extractAllEmbeddedVideoMetadata();
       for (const m of allMeta) {
         const keyMatch = matchesVideoMetadata(state, m);
-        const singleMatch = allMeta.length === 1 || videoRegistry.size === 1;
+        const singleMatch = allMeta.length === 1 || videoRegistry.size <= 1;
         if (keyMatch || singleMatch) {
           if (m.mediaKey) state.mediaKey = m.mediaKey;
           if (m.mediaKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
@@ -1053,12 +1078,35 @@
     state.isDownloading = true;
 
     const textEl = state.mainBtn ? state.mainBtn.querySelector('.vbs-btn-text') : null;
-    if (textEl) textEl.textContent = '0%';
+    if (textEl) {
+      textEl.style.display = 'inline';
+      textEl.textContent = '0%';
+    }
 
     try {
       const assembler = window.GarrettStreamAssembler || globalThis.GarrettStreamAssembler;
       if (!assembler || !assembler.assembleSegments) {
         throw new Error('Stream assembler engine not loaded.');
+      }
+
+      const realDur = resolveRealVideoDuration(state);
+      let urlsToDownload = (segmentUrls && segmentUrls.length > 0) ? segmentUrls.slice() : [];
+
+      // Autonomous Segment Pattern Synthesis:
+      // If segmentUrls doesn't yet cover the full duration, synthesize the complete sequence!
+      if (assembler.synthesizeSegmentUrls && urlsToDownload.length > 0) {
+        const sampleUrl = urlsToDownload[urlsToDownload.length - 1];
+        const syn = assembler.synthesizeSegmentUrls(sampleUrl, realDur);
+        if (syn && syn.urls && syn.urls.length > 0) {
+          if (syn.urls.length > urlsToDownload.length || urlsToDownload.length <= 3) {
+            console.log(`[Garrett] Autonomous crawler: Extrapolating ${urlsToDownload.length} buffered segments to full presentation sequence (${syn.urls.length} segments, ~${Math.round(realDur)}s)`);
+            urlsToDownload = syn.urls;
+          }
+        }
+      }
+
+      if (urlsToDownload.length === 0) {
+        throw new Error('No media segments available to assemble.');
       }
 
       const customFetchBuffer = async (url) => {
@@ -1079,11 +1127,14 @@
       };
 
       const onProgress = (completed, total, pct) => {
-        if (textEl) textEl.textContent = `${pct}%`;
+        if (textEl) {
+          textEl.style.display = 'inline';
+          textEl.textContent = `${pct}%`;
+        }
         safeSendMessage({ action: 'streamProgress', videoId: state.id, completed, total, pct });
       };
 
-      const result = await assembler.assembleSegments(segmentUrls, 'video/mp4', 'mp4', onProgress, customFetchBuffer);
+      const result = await assembler.assembleSegments(urlsToDownload, 'video/mp4', 'mp4', onProgress, customFetchBuffer, { allowTrailingLoss: true });
       const filename = generateFilename(state.video, 'mp4');
       const saved = downloadBlobDirectly(result.blob, filename);
 
@@ -1145,7 +1196,7 @@
         safeSendMessage({
           action: 'downloadUrl',
           url: progUrl,
-          filename: filename,
+          filename,
           saveAs: false
         }, async (resp) => {
           if (resp && resp.success) {
@@ -1186,7 +1237,7 @@
           await downloadStreamInPage(state, manifestUrl, manifestXml);
           return;
         } catch (streamErr) {
-          console.warn('[Garrett] Manifest download failed, falling back to segment queue:', streamErr.message);
+          console.warn('[Garrett] Manifest download failed, engaging segment synthesis crawler:', streamErr.message);
         }
       }
 
@@ -1207,49 +1258,20 @@
         return;
       }
 
-      // Path 3.5: Derived Manifest from Intercepted Segment URL
+      // Path 4: Autonomous Segment Queue & Pattern Synthesis
       const candidateSegs = (stream && stream.allSegments && stream.allSegments.length > 0)
         ? stream.allSegments
         : (state.allSegments && state.allSegments.length > 0 ? state.allSegments : null);
-      if (candidateSegs && candidateSegs.length > 0) {
-        const segUrl = candidateSegs[0];
-        let derivedManifest = null;
-        if (segUrl.includes('/playlist/vid/')) {
-          if (segUrl.includes('/segment/')) {
-            derivedManifest = segUrl.replace(/\/segment\/[^\/]+\/[^\/?#]+/, '/dash/playlist.mpd');
-          } else if (/\/[0-9]+\/[0-9]+(?:\?|$)/.test(segUrl)) {
-            derivedManifest = segUrl.replace(/\/[0-9]+\/[0-9]+(\?|$)/, '/dash/playlist.mpd$1');
-          }
-        }
-        if (derivedManifest) {
-          try {
-            await downloadStreamInPage(state, derivedManifest);
-            return;
-          } catch (e) {
-            console.warn('[Garrett] Derived manifest download attempt:', e.message);
-          }
-        }
-      }
 
-      // Path 4: Complete Segment Queue from playback
-      const segs = candidateSegs;
-      if (segs && segs.length > 0) {
-        const vidDuration = resolveRealVideoDuration(state);
-        // Each segment is typically 2-4 seconds. If video duration is known (>10s),
-        // ensure we have enough segments to cover at least 85% of the full video.
-        // Never save partial 1-2 segment cuts (under 3 segments)!
-        const minExpectedSegments = vidDuration > 10 ? Math.floor((vidDuration * 0.85) / 4.0) : 3;
-        if (segs.length >= minExpectedSegments && segs.length > 2) {
-          await downloadFromSegmentQueue(state, segs);
-          return;
-        } else {
-          console.warn(`[Garrett] Segment queue only has ${segs.length} segments for a ${Math.round(vidDuration)}s video (needs ~${minExpectedSegments}). Avoiding partial cutoff.`);
-        }
+      if (candidateSegs && candidateSegs.length > 0) {
+        await downloadFromSegmentQueue(state, candidateSegs);
+        return;
       }
 
       // Path 5: Final active media stream lock from performance resource entries
       try {
         const resEntries = performance.getEntriesByType('resource');
+        const foundSegments = [];
         for (let i = resEntries.length - 1; i >= 0; i--) {
           const name = resEntries[i].name;
           if (isNonMediaUrl(name)) continue;
@@ -1267,21 +1289,20 @@
               }, 4000);
               return;
             }
-            if ((name.includes('.mpd') || name.includes('.m3u8') || name.includes('playlist.mpd') || name.includes('manifest')) && !name.includes('.m4s') && !name.includes('.ts')) {
-              try {
-                await downloadStreamInPage(state, name);
-                return;
-              } catch (e) {
-                console.warn('[Garrett] Fallback manifest download failed:', e.message);
-              }
+            if (name.includes('.m4s') || name.includes('.ts') || name.includes('/segment/') || /\/[0-9]+\/[0-9]+(?:\?|$)/.test(name)) {
+              foundSegments.push(name);
             }
           }
+        }
+        if (foundSegments.length > 0) {
+          await downloadFromSegmentQueue(state, foundSegments);
+          return;
         }
       } catch (e) {}
 
       // STRICT PROTECTION: Inform user if stream buffering is needed
-      showToast('Stream is buffering. Please play 2-3 seconds of the video so Garrett can lock onto the stream, then click Keep Video.', 5500);
-      safeSendMessage({ action: 'streamError', videoId: state.id, error: 'Stream buffering: Play 2s of video first' });
+      showToast('Stream is buffering. Please play 1-2 seconds of the video so Garrett can lock onto the stream, then click Keep Video.', 5500);
+      safeSendMessage({ action: 'streamError', videoId: state.id, error: 'Stream buffering: Play 1-2s of video first' });
       if (textEl) textEl.textContent = 'Keep Video';
     } catch (err) {
       console.error('[Garrett] keepVideoNow error:', err);
