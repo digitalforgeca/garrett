@@ -31,6 +31,30 @@
     );
   }
 
+  function isGenuineProgressiveMp4Url(url) {
+    if (!url || typeof url !== 'string') return false;
+    if (isNonMediaUrl(url)) return false;
+    const clean = url.split('?')[0].toLowerCase();
+    if (
+      clean.endsWith('.m4s') ||
+      clean.endsWith('.ts') ||
+      clean.endsWith('.init') ||
+      clean.endsWith('/init') ||
+      clean.includes('init.mp4') ||
+      clean.includes('iso.segment') ||
+      clean.includes('/segment/') ||
+      clean.includes('/chunk/') ||
+      clean.includes('output_hls') ||
+      clean.endsWith('.mpd') ||
+      clean.endsWith('.m3u8') ||
+      /\/[0-9]+\/[0-9]+$/.test(clean) ||
+      /\/[0-9]+\/[0-9]+(?:\?|$)/.test(url)
+    ) {
+      return false;
+    }
+    return clean.endsWith('.mp4') || clean.endsWith('.webm') || clean.endsWith('.m4v');
+  }
+
   function isInitBox(arrayBuffer) {
     if (!arrayBuffer || arrayBuffer.byteLength < 8) return false;
     const view = new DataView(arrayBuffer);
@@ -226,6 +250,7 @@
   window.addEventListener('__GARRETT_PROGRESSIVE_DETECTED__', (e) => {
     if (e.detail && e.detail.url) {
       const progUrl = e.detail.url;
+      if (!isGenuineProgressiveMp4Url(progUrl)) return;
       const streamKey = extractStreamKey(progUrl);
       for (const state of videoRegistry.values()) {
         const v = state.video;
@@ -614,9 +639,23 @@
               if (resA !== resB) return resB - resA;
               return (b.bitRate || 0) - (a.bitRate || 0);
             });
-            bestProgUrl = sorted[0]?.streamingLocations?.[0]?.url ||
-                          (typeof sorted[0]?.streamingLocations?.[0] === 'string' ? sorted[0].streamingLocations[0] : null) ||
-                          sorted[0]?.url || null;
+            for (const item of sorted) {
+              if (!item) continue;
+              if (Array.isArray(item.streamingLocations)) {
+                for (const loc of item.streamingLocations) {
+                  const u = (loc && typeof loc === 'object') ? loc.url : (typeof loc === 'string' ? loc : null);
+                  if (u && typeof u === 'string' && isGenuineProgressiveMp4Url(u)) {
+                    bestProgUrl = u;
+                    break;
+                  }
+                }
+              }
+              if (bestProgUrl) break;
+              if (item.url && typeof item.url === 'string' && isGenuineProgressiveMp4Url(item.url)) {
+                bestProgUrl = item.url;
+                break;
+              }
+            }
           }
           const dashUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'DASH' || s.url?.includes('dash') || s.url?.includes('.mpd'))?.url || null;
           const hlsUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'HLS' || s.url?.includes('m3u8'))?.url || null;
@@ -926,7 +965,7 @@
             }
           }
           if (!matchesKey && isPlaying && (resEntries.length - 1 - i < 15)) {
-            if (name.includes('/playlist/vid/') || name.includes('/dash/') || name.includes('/mp4-')) {
+            if (name.includes('/playlist/vid/') || name.includes('/dash/')) {
               matchesKey = true;
             }
           }
@@ -938,7 +977,7 @@
               state.entityKey = streamKey;
             }
 
-            if (name.includes('/mp4-') || (name.includes('/playlist/vid/') && (name.endsWith('.mp4') || name.includes('mp4_')))) {
+            if (isGenuineProgressiveMp4Url(name)) {
               state.progressiveUrl = name;
               return {
                 progressiveUrl: name,
@@ -1041,8 +1080,9 @@
       }
 
       // Allow adequate time for React Fiber inspection to return progressiveStreams.
-      // If after 1600ms no progressive URL is found but manifest/segments are locked, proceed.
-      if (Date.now() - startTime >= 1600 && (state.manifestUrl || (state.allSegments && state.allSegments.length > 0))) {
+      // If after 2000ms no progressive URL is found, proceed only if manifest or substantial segments are locked.
+      const hasSubstantialSegments = state.allSegments && state.allSegments.length >= 6;
+      if (Date.now() - startTime >= 2000 && (state.manifestUrl || hasSubstantialSegments)) {
         break;
       }
 
@@ -1190,6 +1230,16 @@
 
       if (urlsToDownload.length === 0) {
         throw new Error('No media segments available to assemble.');
+      }
+
+      if (urlsToDownload.length <= 3 && realDur > 10) {
+        if (state.progressiveUrl && isGenuineProgressiveMp4Url(state.progressiveUrl)) {
+          state.isDownloading = false;
+          return await keepVideoNow(state);
+        }
+        showToast('Stream is buffering. Please play 2-3 more seconds so Garrett can lock onto the stream, then click Keep Video.', 5000);
+        if (textEl) textEl.textContent = 'Keep Video';
+        return;
       }
 
       const customFetchBuffer = async (url) => {
@@ -1359,7 +1409,7 @@
           const name = resEntries[i].name;
           if (isNonMediaUrl(name)) continue;
           if (name.includes('/playlist/vid/')) {
-            if (name.includes('/mp4-') || name.endsWith('.mp4')) {
+            if (isGenuineProgressiveMp4Url(name)) {
               const filename = generateFilename(state.video, 'mp4');
               safeSendMessage({ action: 'downloadUrl', url: name, filename, saveAs: false });
               showToast(`Downloading full video: ${filename}...`);
@@ -1484,7 +1534,7 @@
           state.progressiveUrl = request.progressiveUrl;
         }
         if (request.streamUrl) {
-          if (request.streamUrl.endsWith('.mp4') || request.streamUrl.includes('/mp4-') || request.streamUrl.includes('mp4_')) {
+          if (isGenuineProgressiveMp4Url(request.streamUrl)) {
             state.progressiveUrl = request.streamUrl;
           } else if (!state.progressiveUrl && (request.streamUrl.includes('.mpd') || request.streamUrl.includes('/dash/') || request.streamUrl.includes('.m3u8'))) {
             state.manifestUrl = request.streamUrl;

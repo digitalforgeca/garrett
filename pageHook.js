@@ -36,30 +36,52 @@
     );
   }
 
-  function isProgressiveMp4Url(url) {
+  function isGenuineProgressiveMp4Url(url) {
+    if (!url || typeof url !== 'string') return false;
     if (isNonMediaUrl(url)) return false;
     const clean = url.split('?')[0].toLowerCase();
-    return (
-      (clean.includes('/playlist/vid/v2/') || clean.includes('/playlist/vid/')) &&
-      (clean.includes('/mp4-') || clean.includes('mp4_') || clean.endsWith('.mp4')) &&
-      !clean.includes('videocover')
-    );
+    // Media segments, init chunks, and manifests are NEVER progressive MP4 files
+    if (
+      clean.endsWith('.m4s') ||
+      clean.endsWith('.ts') ||
+      clean.endsWith('.init') ||
+      clean.endsWith('/init') ||
+      clean.includes('init.mp4') ||
+      clean.includes('iso.segment') ||
+      clean.includes('/segment/') ||
+      clean.includes('/chunk/') ||
+      clean.includes('output_hls') ||
+      clean.endsWith('.mpd') ||
+      clean.endsWith('.m3u8') ||
+      /\/[0-9]+\/[0-9]+$/.test(clean) ||
+      /\/[0-9]+\/[0-9]+(?:\?|$)/.test(url)
+    ) {
+      return false;
+    }
+    return clean.endsWith('.mp4') || clean.endsWith('.webm') || clean.endsWith('.m4v');
+  }
+
+  function isProgressiveMp4Url(url) {
+    return isGenuineProgressiveMp4Url(url);
   }
 
   function isSegmentUrl(url) {
+    if (!url || typeof url !== 'string') return false;
     if (isNonMediaUrl(url)) return false;
-    if (isProgressiveMp4Url(url)) return false;
+    if (isGenuineProgressiveMp4Url(url)) return false;
     const clean = url.split('?')[0].toLowerCase();
     return (
       clean.endsWith('.m4s') ||
       clean.endsWith('.ts') ||
       clean.endsWith('.init') ||
+      clean.endsWith('/init') ||
       clean.includes('init.mp4') ||
       clean.includes('iso.segment') ||
-      clean.includes('/segment') ||
-      clean.includes('/chunk') ||
+      clean.includes('/segment/') ||
+      clean.includes('/chunk/') ||
       clean.includes('output_hls') ||
-      (url.includes('/playlist/vid/') && /\/[0-9]+\/[0-9]+(\?|$)/.test(url))
+      /\/[0-9]+\/[0-9]+$/.test(clean) ||
+      (url.includes('/playlist/vid/') && /\/[0-9]+\/[0-9]+(?:\?|$)/.test(url))
     );
   }
 
@@ -71,21 +93,31 @@
       if (resA !== resB) return resB - resA;
       return (b.bitRate || 0) - (a.bitRate || 0);
     });
-    const best = sorted[0];
-    const loc = best?.streamingLocations?.[0]?.url ||
-                (typeof best?.streamingLocations?.[0] === 'string' ? best.streamingLocations[0] : null) ||
-                best?.url;
-    return loc ? { url: loc, width: best.width, height: best.height, bitRate: best.bitRate } : null;
+    for (const item of sorted) {
+      if (!item) continue;
+      if (Array.isArray(item.streamingLocations)) {
+        for (const loc of item.streamingLocations) {
+          const u = (loc && typeof loc === 'object') ? loc.url : (typeof loc === 'string' ? loc : null);
+          if (u && typeof u === 'string' && isGenuineProgressiveMp4Url(u)) {
+            return { url: u, width: item.width, height: item.height, bitRate: item.bitRate };
+          }
+        }
+      }
+      if (item.url && typeof item.url === 'string' && isGenuineProgressiveMp4Url(item.url)) {
+        return { url: item.url, width: item.width, height: item.height, bitRate: item.bitRate };
+      }
+    }
+    return null;
   }
 
   function parseVideoMetadata(metaObj) {
     if (!metaObj || typeof metaObj !== 'object') return null;
-    const vpm = metaObj.videoPlayMetadata || metaObj;
+    const vpm = metaObj.videoPlayMetadata || metaObj.videoPlayMetadataV2 || metaObj;
     const bestProg = getBestProgressiveUrl(vpm.progressiveStreams);
     const dashUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'DASH' || s.url?.includes('dash') || s.url?.includes('.mpd'))?.url;
     const hlsUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'HLS' || s.url?.includes('m3u8'))?.url;
     const manifestUrl = dashUrl || hlsUrl || (typeof vpm.manifestUrl === 'string' ? vpm.manifestUrl : null);
-    const progUrl = bestProg ? bestProg.url : (typeof vpm.progressiveUrl === 'string' ? vpm.progressiveUrl : null);
+    const progUrl = bestProg ? bestProg.url : (typeof vpm.progressiveUrl === 'string' && isGenuineProgressiveMp4Url(vpm.progressiveUrl) ? vpm.progressiveUrl : null);
     const dur = vpm.duration ? (vpm.duration > 1000 ? vpm.duration / 1000 : vpm.duration) : null;
     const entityUrn = vpm.entityUrn || vpm.mediaUrn || metaObj.entityUrn || null;
 
@@ -336,7 +368,7 @@
   }
 
   function inspectObjectForVideo(obj, depth = 0, visited = new WeakSet()) {
-    if (!obj || depth > 3 || typeof obj !== 'object') return null;
+    if (!obj || depth > 5 || typeof obj !== 'object') return null;
     if (obj instanceof (typeof Node !== 'undefined' ? Node : Object) && obj.nodeType) return null;
     if (obj === window || obj === document) return null;
     if (visited.has(obj)) return null;
@@ -345,11 +377,24 @@
     const parsed = parseVideoMetadata(obj);
     if (parsed) return parsed;
 
+    // Fast-path prioritized keys used by LinkedIn React video components
+    const priorityKeys = [
+      'videoPlayMetadata', 'videoPlayMetadataV2', 'progressiveStreams', 'adaptiveStreams',
+      'video', 'media', 'playMetadata', 'item', 'content', 'data',
+      'playerProps', 'metadata', 'feedSharedVideo'
+    ];
+    for (const k of priorityKeys) {
+      if (k in obj && obj[k] && typeof obj[k] === 'object') {
+        const res = inspectObjectForVideo(obj[k], depth + 1, visited);
+        if (res) return res;
+      }
+    }
+
     for (const k of Object.keys(obj)) {
       if (
         k === '_owner' || k === 'alternate' || k === 'child' || k === 'sibling' ||
         k === 'return' || k === 'stateNode' || k === 'memoizedState' || k === 'dependencies' ||
-        k === 'ref' || k === 'updater' || k.startsWith('__react')
+        k === 'ref' || k === 'updater' || k.startsWith('__react') || priorityKeys.includes(k)
       ) {
         continue;
       }
@@ -368,10 +413,10 @@
     if (!element) return null;
     const visited = new WeakSet();
 
-    // 1. Check DOM Element and immediate parent __reactProps$
+    // 1. Check DOM Element and parent __reactProps$
     let curr = element;
     let d = 0;
-    while (curr && d < 3) {
+    while (curr && d < 12) {
       try {
         const propKey = Object.keys(curr).find(k => k.startsWith('__reactProps$'));
         if (propKey && curr[propKey]) {
@@ -383,26 +428,30 @@
       d++;
     }
 
-    // 2. Direct Fiber Walk: Ascend immediate component tree (max 8 fibers)
+    // 2. Direct Fiber Walk: Ascend component tree via fiber.return
     let fiberNode = element;
     let fDepth = 0;
-    while (fiberNode && fDepth < 3) {
+    let fiber = null;
+    while (fiberNode && fDepth < 4) {
       const fiberKey = Object.keys(fiberNode).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
       if (fiberKey && fiberNode[fiberKey]) {
-        let fiber = fiberNode[fiberKey];
-        let fCount = 0;
-        while (fiber && fCount < 8) {
-          if (fiber.memoizedProps) {
-            const meta = inspectObjectForVideo(fiber.memoizedProps, 0, visited);
-            if (meta) return meta;
-          }
-          fiber = fiber.return;
-          fCount++;
-        }
+        fiber = fiberNode[fiberKey];
         break;
       }
       fiberNode = fiberNode.parentElement;
       fDepth++;
+    }
+
+    if (fiber) {
+      let fCount = 0;
+      while (fiber && fCount < 30) {
+        if (fiber.memoizedProps) {
+          const meta = inspectObjectForVideo(fiber.memoizedProps, 0, visited);
+          if (meta) return meta;
+        }
+        fiber = fiber.return;
+        fCount++;
+      }
     }
 
     return null;

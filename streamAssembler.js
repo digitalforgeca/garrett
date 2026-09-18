@@ -514,6 +514,17 @@
    * Synthesizes the full sequence of segment URLs for a stream up to targetDurationSeconds.
    */
   function synthesizeSegmentUrls(sampleUrl, targetDurationSeconds = 0, options = {}) {
+    if (!sampleUrl || typeof sampleUrl !== 'string') return null;
+
+    // Cryptographic token guard:
+    // On CDNs using path-bound HMAC signatures (e.g. ?t=..., ?token=..., licdn.com),
+    // synthesizing arbitrary paths with the sample URL's token will ALWAYS yield HTTP 403 Forbidden.
+    const isPathSignedCdn = /[?&](?:t|token|sig|signature|hmac)=/i.test(sampleUrl) || sampleUrl.includes('dms.licdn.com');
+    if (isPathSignedCdn && !options.allowHmacSynthesis) {
+      console.warn('[Garrett] Segment URL synthesis disabled for path-signed CDN token to prevent HTTP 403.');
+      return null;
+    }
+
     const pattern = analyzeSegmentUrlPattern(sampleUrl);
     if (!pattern) return null;
 
@@ -544,13 +555,14 @@
   }
 
   /**
-   * Parallel segment downloader and memory assembler
+   * Parallel segment downloader and memory assembler with request pacing
    */
   async function assembleSegments(allUrls, mimeType, ext, onProgress, fetchBuffer, options = {}) {
     const total = allUrls.length;
     let completed = 0;
     const buffers = new Array(total);
-    const concurrency = Math.min(6, total);
+    // Use conservative concurrency (2-3) to avoid CDN rate limits and bot triggers
+    const concurrency = Math.min(3, Math.max(1, total));
     let currentIndex = 0;
     const allowTrailingLoss = options.allowTrailingLoss !== false;
     let eofReached = false;
@@ -563,6 +575,11 @@
         let attempts = 0;
         let success = false;
 
+        // Polite request pacing between segment fetches
+        if (idx > 0) {
+          await new Promise(r => setTimeout(r, 120));
+        }
+
         while (attempts < 3 && !success && !eofReached) {
           try {
             attempts++;
@@ -570,14 +587,15 @@
             success = true;
           } catch (err) {
             const is404 = err && err.message && (err.message.includes('404') || err.message.includes('410'));
-            // If trailing segment (past index 1) returns 404, stream reached EOF
-            if (is404 && allowTrailingLoss && idx > 1) {
+            const is403 = err && err.message && err.message.includes('403');
+            // If trailing segment (past index 0) returns 404 or 403, stream reached EOF or token boundary
+            if ((is404 || is403) && allowTrailingLoss && idx > 0) {
               buffers[idx] = null;
               eofReached = true;
               break;
             }
             if (attempts >= 3) {
-              if (allowTrailingLoss && idx > 1) {
+              if (allowTrailingLoss && idx > 0) {
                 console.warn(`Trailing segment ${idx + 1}/${total} not available (${err.message}), stopping stream.`);
                 buffers[idx] = null;
                 eofReached = true;
@@ -586,7 +604,7 @@
               console.error(`Failed segment ${idx + 1}/${total} (${url}):`, err);
               throw new Error(`Failed segment ${idx + 1}/${total}: ${err.message}`);
             }
-            await new Promise(r => setTimeout(r, 300 * attempts));
+            await new Promise(r => setTimeout(r, 400 * attempts));
           }
         }
 
