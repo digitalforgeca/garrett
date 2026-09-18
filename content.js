@@ -535,12 +535,25 @@
 
       let maxSec = 0;
 
-      // 1. Check progress sliders and range inputs (e.g., aria-valuemax="84" or max="113")
+      // 1. Check progress sliders and range inputs (disregard 100/1 which represent 0-100% progress)
       for (const root of searchRoots) {
         const sliders = root.querySelectorAll('[role="slider"], input[type="range"], [class*="progress"], [class*="seekbar"]');
         for (const s of sliders) {
+          const ariaText = s.getAttribute('aria-valuetext') || '';
+          if (ariaText) {
+            const m = [...ariaText.matchAll(/\b(?:(\d+):)?(\d{1,2}):(\d{2})\b/g)];
+            for (const match of m) {
+              const h = match[1] ? parseInt(match[1], 10) : 0;
+              const mins = parseInt(match[2], 10);
+              const secs = parseInt(match[3], 10);
+              const tot = h * 3600 + mins * 60 + secs;
+              if (tot > maxSec) maxSec = tot;
+            }
+          }
           const vMax = parseFloat(s.getAttribute('aria-valuemax') || s.getAttribute('max') || '0');
-          if (vMax > maxSec && isFinite(vMax)) maxSec = vMax;
+          if (vMax > 0 && vMax !== 100 && vMax !== 1 && isFinite(vMax)) {
+            if (vMax > maxSec) maxSec = vMax;
+          }
         }
       }
 
