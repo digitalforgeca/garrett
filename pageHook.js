@@ -7,6 +7,7 @@
   const cachedManifests = [];
   const cachedMetadata = [];
   const cachedBlobs = [];
+  const cachedSegments = [];
 
   function isNonMediaUrl(url) {
     if (!url || typeof url !== 'string') return true;
@@ -103,17 +104,23 @@
     if (!item) return null;
     if (typeof item === 'string') return item;
     if (typeof item.url === 'string') return item.url;
+    if (typeof item.src === 'string') return item.src;
+    if (typeof item.manifestUrl === 'string') return item.manifestUrl;
+    if (typeof item.playbackUrl === 'string') return item.playbackUrl;
+    if (typeof item.masterPlaylistUrl === 'string') return item.masterPlaylistUrl;
     if (Array.isArray(item.streamingLocations)) {
       for (const loc of item.streamingLocations) {
         if (!loc) continue;
         if (typeof loc === 'string') return loc;
         if (typeof loc.url === 'string') return loc.url;
+        if (typeof loc.src === 'string') return loc.src;
       }
     }
     const singleLoc = item.streamingLocation || item.location;
     if (singleLoc) {
       if (typeof singleLoc === 'string') return singleLoc;
       if (typeof singleLoc.url === 'string') return singleLoc.url;
+      if (typeof singleLoc.src === 'string') return singleLoc.src;
     }
     return null;
   }
@@ -214,6 +221,9 @@
       if (Array.isArray(node.progressiveStreams) || Array.isArray(node.adaptiveStreams)) {
         collected.push({ parent: node, vpm: node });
       }
+      if (node['$type'] && typeof node['$type'] === 'string' && node['$type'].includes('VideoPlayMetadata')) {
+        collected.push({ parent: node, vpm: node });
+      }
       if (Array.isArray(node)) {
         for (let i = 0; i < node.length && i < 80; i++) scan(node[i], depth + 1);
       } else {
@@ -283,6 +293,8 @@
             detail: { url, timestamp: Date.now() }
           }));
         } else if (isSegmentUrl(url)) {
+          cachedSegments.push({ url, timestamp: Date.now() });
+          if (cachedSegments.length > 150) cachedSegments.shift();
           window.dispatchEvent(new CustomEvent('__GARRETT_SEGMENT_DETECTED__', {
             detail: { url, timestamp: Date.now() }
           }));
@@ -312,11 +324,12 @@
             }).catch(() => {});
           } catch (e) {}
         } else if (
-          contentType.includes('application/json') ||
-          contentType.includes('application/graphql') ||
+          contentType.includes('json') ||
+          contentType.includes('graphql') ||
           url.includes('/voyager/') ||
           url.includes('/graphql') ||
-          url.includes('/feed/')
+          url.includes('/feed/') ||
+          url.includes('/rest/')
         ) {
           try {
             const cloned = response.clone();
@@ -361,13 +374,15 @@
             detail: { url, timestamp: Date.now() }
           }));
         } else if (isSegmentUrl(url)) {
+          cachedSegments.push({ url, timestamp: Date.now() });
+          if (cachedSegments.length > 150) cachedSegments.shift();
           window.dispatchEvent(new CustomEvent('__GARRETT_SEGMENT_DETECTED__', {
             detail: { url, timestamp: Date.now() }
           }));
         }
 
         const isManifest = isManifestUrl(url);
-        if (isManifest || url.includes('/voyager/') || url.includes('/graphql') || url.includes('/feed/')) {
+        if (isManifest || url.includes('/voyager/') || url.includes('/graphql') || url.includes('/feed/') || url.includes('/rest/')) {
           this.addEventListener('load', () => {
             try {
               if (this.status >= 200 && this.status < 300 && this.responseText) {
@@ -627,6 +642,9 @@
     }
     for (const mf of cachedManifests) {
       window.dispatchEvent(new CustomEvent('__GARRETT_MANIFEST_CONTENT__', { detail: mf }));
+    }
+    for (const s of cachedSegments) {
+      window.dispatchEvent(new CustomEvent('__GARRETT_SEGMENT_DETECTED__', { detail: s }));
     }
   });
 })();

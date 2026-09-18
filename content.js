@@ -13,7 +13,6 @@
 
   // Raw chunks passive fallback
   const recentChunks = [];
-  let lastInitChunk = null;
 
   // React stream cache from pageHook.js
   const reactStreamCache = new Map(); // blobUrl -> { manifestUrl, entityUrn, duration }
@@ -226,9 +225,6 @@
     if (e.detail && e.detail.chunk) {
       const chunk = e.detail.chunk;
       const isInit = isInitBox(chunk);
-      if (isInit) {
-        lastInitChunk = chunk;
-      }
       const msId = e.detail.mediaSourceId;
       const targetBlobUrl = msId ? mediaSourceToBlob.get(msId) : null;
 
@@ -726,7 +722,7 @@
             if (m1) nodeKeys.push(m1[1]);
             const m2 = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
             if (m2) nodeKeys.push(m2[1]);
-            const m3 = val.match(/([CD][A-Za-z0-9_-]{8,})/);
+            const m3 = val.match(/([A-Za-z0-9_-]{12,})/);
             if (m3) nodeKeys.push(m3[1]);
           };
           if (node.urn) checkNodeVal(node.urn);
@@ -766,7 +762,7 @@
             if (m1) allKeys.add(m1[1]);
             const m2 = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
             if (m2) allKeys.add(m2[1]);
-            const m3 = val.match(/([CD][A-Za-z0-9_-]{8,})/);
+            const m3 = val.match(/([A-Za-z0-9_-]{12,})/);
             if (m3) allKeys.add(m3[1]);
           };
 
@@ -841,6 +837,37 @@
     return results;
   }
 
+  function resetVideoStateForNewStream(state, newSrc) {
+    const curSrc = newSrc || (state.video ? (state.video.currentSrc || state.video.src || '') : '');
+    state.currentBlobUrl = curSrc;
+    state.progressiveUrl = null;
+    state.manifestUrl = null;
+    state.manifestXml = null;
+    state.allSegments = [];
+    state.capturedChunks = [];
+    state.initChunk = null;
+    state.initSegmentUrl = null;
+    state.isKept = false;
+    state.keptFilename = null;
+    state.isDownloading = false;
+    state.duration = 0;
+    if (state.mainBtn) {
+      const textEl = state.mainBtn.querySelector('.vbs-btn-text');
+      if (textEl) {
+        textEl.textContent = 'Keep Video';
+        textEl.style.display = 'none';
+      }
+    }
+    if (state.video) {
+      const info = extractVideoEntityInfoFromDom(state.video);
+      state.entityKey = info.primaryKey || '';
+      state.mediaKey = info.mediaKey || '';
+      state.activityUrn = info.activityUrn || '';
+      state.allKeys = new Set(info.allKeys);
+      state.poster = state.video.getAttribute('poster') || '';
+    }
+  }
+
   function registerVideo(video) {
     if (videoRegistry.has(video)) return;
 
@@ -857,6 +884,7 @@
       activityUrn: entityInfo.activityUrn,
       allKeys: entityInfo.allKeys,
       poster,
+      currentBlobUrl: video.currentSrc || video.src || '',
       progressiveUrl: null,
       manifestUrl: null,
       manifestXml: null,
@@ -894,6 +922,12 @@
     }));
 
     const onUserPlay = () => {
+      const curSrc = video.currentSrc || video.src || '';
+      if (curSrc && state.currentBlobUrl && curSrc !== state.currentBlobUrl) {
+        resetVideoStateForNewStream(state, curSrc);
+      } else if (curSrc && !state.currentBlobUrl) {
+        state.currentBlobUrl = curSrc;
+      }
       const info = extractVideoEntityInfoFromDom(video);
       if (info.primaryKey && !state.entityKey) state.entityKey = info.primaryKey;
       if (info.mediaKey && !state.mediaKey) state.mediaKey = info.mediaKey;
@@ -911,6 +945,17 @@
       notifyBackground(state);
     };
 
+    const onSrcChange = () => {
+      const newSrc = video.currentSrc || video.src || '';
+      if (newSrc && newSrc !== state.currentBlobUrl) {
+        console.log(`[Garrett] Video source transition detected (${state.currentBlobUrl} -> ${newSrc}). Purging stale stream state.`);
+        resetVideoStateForNewStream(state, newSrc);
+        onUserPlay();
+      }
+    };
+
+    video.addEventListener('loadstart', onSrcChange);
+    video.addEventListener('emptied', onSrcChange);
     video.addEventListener('play', onUserPlay);
     video.addEventListener('loadedmetadata', onUserPlay);
     video.addEventListener('timeupdate', () => {
@@ -1401,7 +1446,7 @@
         duration: realDur,
         customFetchText,
         customFetchBuffer,
-        initBuffer: state.initChunk || lastInitChunk
+        initBuffer: (state.initChunk && isInitBox(state.initChunk)) ? state.initChunk : null
       });
 
       const filename = generateFilename(state.video, result.ext || 'mp4');
@@ -1465,47 +1510,108 @@
         return await keepVideoNow(state);
       }
 
-      // Check authentic MSE chunks coverage
-      const expectedMinChunks = (realDur > 10) ? Math.max(3, Math.floor(realDur / 4.5)) : 3;
-      let rawChunks = state.capturedChunks ? deduplicateChunks(state.capturedChunks) : [];
+      // Collect all candidate URLs from arguments, state.allSegments, and performance resource entries
+      const candidateSet = new Set();
+      if (Array.isArray(segmentUrls)) {
+        for (const u of segmentUrls) if (u && typeof u === 'string') candidateSet.add(u);
+      }
+      if (Array.isArray(state.allSegments)) {
+        for (const u of state.allSegments) if (u && typeof u === 'string') candidateSet.add(u);
+      }
 
-      let urlsToDownload = (segmentUrls && segmentUrls.length > 0) ? segmentUrls.slice() : [];
-
-      // Priority Path: Authentic MSE captured chunks from the player's active SourceBuffer
-      if (rawChunks.length >= 3 && (rawChunks.length >= expectedMinChunks || urlsToDownload.length <= 3)) {
-        const initBuf = state.initChunk || lastInitChunk;
-        if (initBuf && isInitBox(initBuf)) {
-          console.log(`[Garrett] Assembling ${rawChunks.length} authentic MSE chunks with initialization header...`);
-          const allBuffers = [initBuf, ...rawChunks];
-          const blob = new Blob(allBuffers, { type: 'video/mp4' });
-          if (blob.size >= 32768) {
-            const filename = generateFilename(state.video, 'mp4');
-            const saved = downloadBlobDirectly(blob, filename);
-            if (saved) {
-              showToast(`"What was taken is now safely kept." — Garrett (${filename})`, 6000);
-              markVideoAsKept(state, filename);
-              safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
-              return;
+      try {
+        const resEntries = performance.getEntriesByType('resource');
+        for (let i = resEntries.length - 1; i >= 0; i--) {
+          const name = resEntries[i].name;
+          if (isNonMediaUrl(name)) continue;
+          if (name.includes('.m4s') || name.includes('.ts') || name.includes('/segment/') || /\/[0-9]+\/[0-9]+(?:\?|$)/.test(name)) {
+            let matches = (state.mediaKey && entityKeysMatch(state.mediaKey, name)) ||
+                          (state.entityKey && entityKeysMatch(state.entityKey, name));
+            if (!matches && candidateSet.size > 0) {
+              for (const existingUrl of candidateSet) {
+                const sampleKey = extractStreamKey(existingUrl);
+                if (sampleKey && entityKeysMatch(sampleKey, name)) {
+                  matches = true;
+                  break;
+                }
+              }
             }
+            if (matches) candidateSet.add(name);
+          }
+        }
+      } catch (e) {}
+
+      const allCandidateUrls = Array.from(candidateSet);
+      if (allCandidateUrls.length === 0) {
+        throw new Error('No media segments available to assemble.');
+      }
+
+      // Group candidate URLs by stream representation to prevent mixing codecs/resolutions
+      const repGroups = new Map();
+      for (const url of allCandidateUrls) {
+        // LinkedIn pattern: .../<variant>/<repId>/<seq>/<ts>?...
+        const liMatch = url.match(/^(https?:\/\/[^\?#]+\/([^\/]+)\/([^\/]+))\/\d+\/\d+/i);
+        const genMatch = url.match(/^(https?:\/\/[^\?#]+\/)([^\/?#]+)/i);
+        const repKey = liMatch ? liMatch[1] : (genMatch ? genMatch[1] : url.split('?')[0]);
+        if (!repGroups.has(repKey)) repGroups.set(repKey, []);
+        repGroups.get(repKey).push(url);
+      }
+
+      // Select best representation: prefer AVC (universally playable) if present, else representation with most segments
+      let chosenRepKey = null;
+      let chosenUrls = [];
+      for (const [key, urls] of repGroups.entries()) {
+        const keyLower = key.toLowerCase();
+        const isAvc = !keyLower.includes('av1') && (keyLower.includes('avc') || keyLower.includes('h264') || keyLower.includes('2mbps') || keyLower.includes('720p'));
+        if (!chosenRepKey) {
+          chosenRepKey = key;
+          chosenUrls = urls;
+        } else {
+          const chosenLower = chosenRepKey.toLowerCase();
+          const chosenIsAvc = !chosenLower.includes('av1') && (chosenLower.includes('avc') || chosenLower.includes('h264') || chosenLower.includes('2mbps'));
+          if (isAvc && !chosenIsAvc && urls.length >= 3) {
+            chosenRepKey = key;
+            chosenUrls = urls;
+          } else if (isAvc === chosenIsAvc && urls.length > chosenUrls.length) {
+            chosenRepKey = key;
+            chosenUrls = urls;
           }
         }
       }
 
-      // Autonomous Segment Pattern Synthesis (only for non-HMAC streams)
-      if (assembler.synthesizeSegmentUrls && urlsToDownload.length > 0) {
-        const sampleUrl = urlsToDownload[urlsToDownload.length - 1];
-        const syn = assembler.synthesizeSegmentUrls(sampleUrl, realDur);
-        if (syn && syn.urls && syn.urls.length > 0) {
-          if (syn.urls.length > urlsToDownload.length || urlsToDownload.length <= 3) {
-            console.log(`[Garrett] Autonomous crawler: Extrapolating ${urlsToDownload.length} buffered segments to full presentation sequence (${syn.urls.length} segments, ~${Math.round(realDur)}s)`);
-            urlsToDownload = syn.urls;
+      // Sort and deduplicate selected representation URLs by sequence index
+      const seqMap = new Map();
+      let initSegmentUrl = null;
+
+      for (const u of chosenUrls) {
+        const mLi = u.match(/\/(\d+)\/\d+(?:\?|$)/);
+        const mGen = u.match(/(?:segment|chunk|seg)[_-]?(\d+)/i) || u.match(/\/(\d+)\.(?:m4s|ts|mp4)/i);
+        const seq = mLi ? parseInt(mLi[1], 10) : (mGen ? parseInt(mGen[1], 10) : null);
+        if (seq !== null) {
+          if (seq === 1 && (u.includes('init') || u.includes('/1/'))) {
+            initSegmentUrl = u;
           }
+          if (!seqMap.has(seq)) seqMap.set(seq, u);
+        } else {
+          if (u.includes('init') && !initSegmentUrl) initSegmentUrl = u;
+          else seqMap.set(seqMap.size + 100, u);
         }
       }
 
-      // Incomplete segment sequence protection: If presentation is long but we only have partial buffered segments,
-      // perform aggressive manifest recovery before assembling an incomplete truncation
-      if (realDur > 15 && urlsToDownload.length < Math.floor(expectedMinChunks * 0.85)) {
+      const sortedSeqs = Array.from(seqMap.keys()).sort((a, b) => a - b);
+      let urlsToDownload = sortedSeqs.map(k => seqMap.get(k));
+
+      // Ensure init segment is at index 0
+      if (initSegmentUrl && urlsToDownload[0] !== initSegmentUrl) {
+        urlsToDownload = urlsToDownload.filter(u => u !== initSegmentUrl);
+        urlsToDownload.unshift(initSegmentUrl);
+      }
+
+      // Check segment sequence coverage against expected presentation duration
+      const segDuration = 4.0;
+      const expectedMinChunks = (realDur > 10) ? Math.max(3, Math.floor(realDur / (segDuration + 0.5))) : 3;
+
+      if (realDur > 12 && urlsToDownload.length < Math.floor(expectedMinChunks * 0.85)) {
         const curSrc = state.video ? (state.video.currentSrc || state.video.src || '') : '';
         window.dispatchEvent(new CustomEvent('__GARRETT_QUERY_REACT_STREAM__', {
           detail: { videoId: state.id, blobUrl: curSrc }
@@ -1518,56 +1624,17 @@
           return await keepVideoNow(state);
         }
 
-        if (!state.manifestUrl) {
-          try {
-            const resEntries = performance.getEntriesByType('resource');
-            for (let i = resEntries.length - 1; i >= 0; i--) {
-              const name = resEntries[i].name;
-              if (isNonMediaUrl(name)) continue;
-              const isDashOrHls = (name.includes('.mpd') || name.includes('/dash/') || name.includes('.m3u8') || (name.includes('/playlist/vid/') && name.includes('manifest'))) &&
-                !name.includes('.m4s') && !name.includes('.ts') && !name.includes('.init') && !name.includes('/init') && !/\/[0-9]+\/[0-9]+(?:\?|$)/.test(name);
-              if (isDashOrHls) {
-                const nameKey = extractStreamKey(name);
-                const matchesKey = (nameKey && state.allSegments && state.allSegments.some(s => extractStreamKey(s) === nameKey)) ||
-                                   (state.mediaKey && nameKey && entityKeysMatch(state.mediaKey, nameKey)) ||
-                                   (state.entityKey && entityKeysMatch(state.entityKey, name));
-                if (matchesKey || videoRegistry.size === 1) {
-                  state.manifestUrl = name;
-                  if (queue) queue.registerManifest(name);
-                  break;
-                }
-              }
-            }
-          } catch (e) {}
-        }
-
-        if (state.manifestUrl) {
-          state.isDownloading = false;
-          return await downloadStreamInPage(state, state.manifestUrl, state.manifestXml);
-        }
-      }
-
-      // If after all checks we only have <= 3 segments and < 3 raw chunks, NEVER assemble a 4s snippet!
-      if (urlsToDownload.length <= 3 && rawChunks.length < 3) {
-        // One final check for React Fiber progressive stream
-        const curSrc = state.video ? (state.video.currentSrc || state.video.src || '') : '';
-        window.dispatchEvent(new CustomEvent('__GARRETT_QUERY_REACT_STREAM__', {
-          detail: { videoId: state.id, blobUrl: curSrc }
-        }));
-        await new Promise(r => setTimeout(r, 400));
-        if (state.progressiveUrl && isGenuineProgressiveMp4Url(state.progressiveUrl)) {
-          state.isDownloading = false;
-          return await keepVideoNow(state);
-        }
         if (state.manifestUrl) {
           state.isDownloading = false;
           return await downloadStreamInPage(state, state.manifestUrl, state.manifestXml);
         }
 
-        showToast('Stream is buffering. Please play 1-2 seconds of the video so Garrett can lock onto the complete presentation, then click Keep Video.', 5500);
-        if (textEl) textEl.textContent = 'Keep Video';
-        state.isDownloading = false;
-        return;
+        if (urlsToDownload.length < Math.min(expectedMinChunks - 1, 6)) {
+          showToast(`Stream buffering: Garrett has captured ${urlsToDownload.length} segments (~${Math.round(urlsToDownload.length * segDuration)}s). Please let the video play to finish buffering, then click Keep Video.`, 5500);
+          if (textEl) textEl.textContent = 'Keep Video';
+          state.isDownloading = false;
+          return;
+        }
       }
 
       if (urlsToDownload.length === 0) {
@@ -1599,9 +1666,11 @@
         safeSendMessage({ action: 'streamProgress', videoId: state.id, completed, total, pct });
       };
 
+      const initBufToUse = (state.initChunk && isInitBox(state.initChunk)) ? state.initChunk : null;
+
       const result = await assembler.assembleSegments(urlsToDownload, 'video/mp4', 'mp4', onProgress, customFetchBuffer, {
         allowTrailingLoss: true,
-        initBuffer: state.initChunk || lastInitChunk
+        initBuffer: initBufToUse
       });
       const filename = generateFilename(state.video, 'mp4');
       const saved = downloadBlobDirectly(result.blob, filename);

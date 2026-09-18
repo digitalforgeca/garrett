@@ -181,9 +181,43 @@
       }
 
       // 2. Otherwise sort the captured segment playlist by sequence index
-      const sorted = Array.from(this.playlist.values()).sort((a, b) => a.index - b.index);
+      const allItems = Array.from(this.playlist.values());
+      const repGroups = new Map();
+      for (const item of allItems) {
+        const u = item.url;
+        const liMatch = u.match(/^(https?:\/\/[^\?#]+\/([^\/]+)\/([^\/]+))\/\d+\/\d+/i);
+        const genMatch = u.match(/^(https?:\/\/[^\?#]+\/)([^\/?#]+)/i);
+        const repKey = liMatch ? liMatch[1] : (genMatch ? genMatch[1] : u.split('?')[0]);
+        if (!repGroups.has(repKey)) repGroups.set(repKey, []);
+        repGroups.get(repKey).push(item);
+      }
+
+      let bestItems = allItems;
+      if (repGroups.size > 1) {
+        let chosenKey = null;
+        for (const [key, items] of repGroups.entries()) {
+          const keyLower = key.toLowerCase();
+          const isAvc = !keyLower.includes('av1') && (keyLower.includes('avc') || keyLower.includes('h264') || keyLower.includes('2mbps'));
+          if (!chosenKey) {
+            chosenKey = key;
+            bestItems = items;
+          } else {
+            const chosenLower = chosenKey.toLowerCase();
+            const chosenIsAvc = !chosenLower.includes('av1') && (chosenLower.includes('avc') || chosenLower.includes('h264') || chosenLower.includes('2mbps'));
+            if (isAvc && !chosenIsAvc && items.length >= 3) {
+              chosenKey = key;
+              bestItems = items;
+            } else if (isAvc === chosenIsAvc && items.length > bestItems.length) {
+              chosenKey = key;
+              bestItems = items;
+            }
+          }
+        }
+      }
+
+      const sorted = bestItems.sort((a, b) => a.index - b.index);
       const urls = [];
-      if (this.initSegmentUrl) urls.push(this.initSegmentUrl);
+      if (this.initSegmentUrl && !urls.includes(this.initSegmentUrl)) urls.push(this.initSegmentUrl);
       for (const item of sorted) {
         if (!urls.includes(item.url)) {
           urls.push(item.url);
