@@ -199,6 +199,15 @@
       if (!mediaKey && progUrl) {
         mediaKey = extractStreamKey(progUrl);
       }
+      if (!mediaKey && manifestUrl) {
+        mediaKey = extractStreamKey(manifestUrl);
+      }
+      if (!mediaKey && dashUrl) {
+        mediaKey = extractStreamKey(dashUrl);
+      }
+      if (!mediaKey && hlsUrl) {
+        mediaKey = extractStreamKey(hlsUrl);
+      }
 
       return {
         progressiveUrl: progUrl,
@@ -270,7 +279,10 @@
                          checkMedia(vpm.entityUrn) ||
                          checkMedia(parent.mediaUrn) ||
                          checkMedia(parent.entityUrn) ||
-                         (parsed.progressiveUrl ? extractStreamKey(parsed.progressiveUrl) : null);
+                         (parsed.progressiveUrl ? extractStreamKey(parsed.progressiveUrl) : null) ||
+                         (parsed.manifestUrl ? extractStreamKey(parsed.manifestUrl) : null) ||
+                         (parsed.dashUrl ? extractStreamKey(parsed.dashUrl) : null) ||
+                         (parsed.hlsUrl ? extractStreamKey(parsed.hlsUrl) : null);
 
         let activityUrn = item.activityUrn;
         if (!activityUrn) {
@@ -320,7 +332,15 @@
         }
       }
 
-      const response = await originalFetch.apply(this, args);
+      let response;
+      try {
+        response = await originalFetch.apply(this, args);
+      } catch (fetchErr) {
+        if (typeof url === 'string' && url.startsWith('chrome-extension://invalid')) {
+          return new Response('', { status: 404, statusText: 'Extension Invalidated' });
+        }
+        throw fetchErr;
+      }
 
       if (url && response && response.ok) {
         const contentType = (response.headers && response.headers.get('content-type')) || '';

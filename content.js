@@ -171,6 +171,8 @@
     return entityKeysMatch(streamKey, key);
   }
 
+  const discoveredManifestCache = [];
+
   // Listen for telemetry events from pageHook.js (MAIN world)
   window.addEventListener('__GARRETT_MANIFEST_CONTENT__', (e) => {
     if (e.detail && e.detail.url && !isNonMediaUrl(e.detail.url)) {
@@ -185,6 +187,9 @@
 
       const streamKey = extractStreamKey(e.detail.url);
       if (!streamKey) return;
+
+      discoveredManifestCache.push({ url: e.detail.url, text: e.detail.text || '', streamKey });
+      if (discoveredManifestCache.length > 50) discoveredManifestCache.shift();
 
       for (const state of videoRegistry.values()) {
         if (!state.video || !state.video.isConnected) continue;
@@ -424,7 +429,7 @@
     const poster = video.getAttribute('poster') || video.poster || '';
     if (poster) {
       const cleanPoster = poster.split('?')[0].toLowerCase();
-      if (!cleanPoster.includes('profile-displayphoto') && !cleanPoster.includes('company-logo') && !cleanPoster.includes('feedshare-shrink')) {
+      if (!cleanPoster.includes('profile-displayphoto') && !cleanPoster.includes('company-logo')) {
         const pm = poster.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i);
         if (pm) {
           info.mediaKey = pm[1];
@@ -443,7 +448,7 @@
       for (const el of thumbElements) {
         const src = el.src || el.getAttribute('src') || el.getAttribute('style') || '';
         const cleanSrc = src.split('?')[0].toLowerCase();
-        if (cleanSrc.includes('profile-displayphoto') || cleanSrc.includes('company-logo') || cleanSrc.includes('feedshare-shrink')) {
+        if (cleanSrc.includes('profile-displayphoto') || cleanSrc.includes('company-logo')) {
           continue;
         }
         const m = src.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i);
@@ -632,28 +637,25 @@
       : 0;
 
     const isBlob = currentSrc.startsWith('blob:');
-    if (vidDur > 5) {
-      return vidDur;
-    }
     if (!isBlob && vidDur > 0) {
       return vidDur;
     }
+    // For blob (MSE) streams, video.duration represents ONLY the buffered chunks (e.g. 24s, 36s).
+    // It must NEVER be used as the presentation duration, as doing so artificially truncates DASH synthesis.
     return 0;
   }
 
   function matchesVideoMetadata(videoState, meta) {
     if (!videoState || !meta) return false;
 
-    // 1. Match by mediaKey (most specific)
-    if (videoState.mediaKey && meta.mediaKey) {
-      if (entityKeysMatch(videoState.mediaKey, meta.mediaKey)) return true;
-      return false;
+    // 1. Match by mediaKey
+    if (videoState.mediaKey && meta.mediaKey && entityKeysMatch(videoState.mediaKey, meta.mediaKey)) {
+      return true;
     }
 
     // 2. Match by post activity URN
-    if (videoState.activityUrn && meta.activityUrn) {
-      if (entityKeysMatch(videoState.activityUrn, meta.activityUrn)) return true;
-      return false;
+    if (videoState.activityUrn && meta.activityUrn && entityKeysMatch(videoState.activityUrn, meta.activityUrn)) {
+      return true;
     }
 
     // 3. Match by active blob URL
@@ -1809,7 +1811,36 @@
       let manifestUrl = (stream && stream.url) || state.manifestUrl;
       let manifestXml = (stream && stream.manifestXml) || state.manifestXml || '';
 
-      // If manifest URL was not yet set, scan performance resource entries BEFORE segment queue
+      // If manifest URL was not yet set, check discoveredManifestCache first, then performance resource entries
+      if (!manifestUrl && state.mediaKey) {
+        for (const mf of discoveredManifestCache) {
+          if (entityKeysMatch(state.mediaKey, mf.streamKey)) {
+            manifestUrl = mf.url;
+            manifestXml = mf.text;
+            state.manifestUrl = mf.url;
+            state.manifestXml = mf.text;
+            break;
+          }
+        }
+      }
+      if (!manifestUrl && state.allSegments && state.allSegments.length > 0) {
+        for (const seg of state.allSegments) {
+          const segKey = extractStreamKey(seg);
+          if (!segKey) continue;
+          for (const mf of discoveredManifestCache) {
+            if (entityKeysMatch(segKey, mf.streamKey)) {
+              manifestUrl = mf.url;
+              manifestXml = mf.text;
+              state.manifestUrl = mf.url;
+              state.manifestXml = mf.text;
+              if (!state.mediaKey) state.mediaKey = segKey;
+              break;
+            }
+          }
+          if (manifestUrl) break;
+        }
+      }
+
       if (!manifestUrl && state.mediaKey) {
         try {
           const resEntries = performance.getEntriesByType('resource');

@@ -272,32 +272,34 @@
               }
             }
 
-            // Extrapolate to full presentation duration if manifest timeline only provided initial chunks
-            if (totalDurationSeconds > 5 && timescaleVal > 0) {
-              const maxTime = totalDurationSeconds * timescaleVal;
-              const stepD = lastD > 0 ? lastD : (2 * timescaleVal);
-              while (currentTime < maxTime) {
-                const segRaw = expandTemplate(mediaTpl, id, bandwidth, currentNum, currentTime);
-                segments.push(resolveUrl(segRaw, baseUrl));
-                currentNum++;
-                currentTime += stepD;
-              }
-            } else if (segments.length <= 4 && timescaleVal > 0) {
-              // Presentation duration unknown or was <= 5s: synthesize at least 50 segments
-              // assembleSegments will crawl until the first trailing 404
-              const stepD = lastD > 0 ? lastD : (2 * timescaleVal);
-              const targetCount = Math.max(50, segments.length + 45);
-              while (segments.length < targetCount) {
-                const segRaw = expandTemplate(mediaTpl, id, bandwidth, currentNum, currentTime);
-                segments.push(resolveUrl(segRaw, baseUrl));
-                currentNum++;
-                currentTime += stepD;
-              }
+            // Extrapolate to full presentation duration if manifest timeline only provided initial chunks.
+            // On dynamic/sliding window DASH manifests (such as LinkedIn), the manifest timeline only lists
+            // the initial window (e.g. 6 segments = 24s or 9 segments = 36s).
+            // We ALWAYS extrapolate beyond the initial window. If totalDurationSeconds is known, extrapolate
+            // up to targetMaxTime plus safety padding; if unknown or short, synthesize forward generously
+            // (e.g. at least 60 additional segments). assembleSegments will safely download segments in order
+            // and gracefully conclude when the trailing 404 is encountered.
+            const stepD = lastD > 0 ? lastD : (2 * timescaleVal);
+            let targetMaxTime = (totalDurationSeconds > 5 && timescaleVal > 0) ? (totalDurationSeconds * timescaleVal) : 0;
+            const minExtrapolateSegments = 60;
+            const targetCount = Math.max(
+              targetMaxTime > 0 ? (Math.ceil(targetMaxTime / stepD) + 3) : 0,
+              segments.length + minExtrapolateSegments,
+              75
+            );
+            const safeMaxSegments = Math.min(targetCount, 400);
+
+            while (segments.length < safeMaxSegments) {
+              const segRaw = expandTemplate(mediaTpl, id, bandwidth, currentNum, currentTime);
+              segments.push(resolveUrl(segRaw, baseUrl));
+              currentNum++;
+              currentTime += stepD;
             }
-          } else if (durationVal > 0 && mediaTpl && totalDurationSeconds > 0) {
-            // Case B: Static duration on <SegmentTemplate> with presentation duration
-            const segDuration = durationVal / timescaleVal;
-            const segCount = Math.ceil(totalDurationSeconds / segDuration);
+          } else if (durationVal > 0 && mediaTpl) {
+            // Case B: Static duration on <SegmentTemplate>
+            const segDuration = timescaleVal > 0 ? (durationVal / timescaleVal) : 2.0;
+            const targetSec = totalDurationSeconds > 0 ? totalDurationSeconds : 180;
+            const segCount = Math.min(Math.ceil(targetSec / segDuration) + 5, 350);
             let currentTime = 0;
             let currentNum = startNum;
 
