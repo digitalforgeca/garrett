@@ -90,9 +90,16 @@
       const rdMatch = url.match(/v\.redd\.it\/([a-zA-Z0-9_-]+)/i);
       if (rdMatch) return `rd_${rdMatch[1]}`;
 
-      // 4. YouTube video ID
-      const ytMatch = url.match(/(?:v=|embed\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/i);
+      // 4. YouTube video ID & googlevideo streams
+      const ytMatch = url.match(/(?:v=|embed\/|shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/i);
       if (ytMatch) return `yt_${ytMatch[1]}`;
+
+      if (url.includes('googlevideo.com/videoplayback') || url.includes('/videoplayback')) {
+        const docidMatch = url.match(/[?&]docid=([a-zA-Z0-9_-]{11})/i);
+        if (docidMatch) return `yt_${docidMatch[1]}`;
+        const idMatch = url.match(/[?&]id=([a-zA-Z0-9_-]+)/i);
+        if (idMatch) return `gv_${idMatch[1]}`;
+      }
 
       // 5. Explicit segment or manifest URLs only
       const clean = url.split('?')[0].toLowerCase();

@@ -9,6 +9,95 @@
   const cachedBlobs = [];
   const cachedSegments = [];
 
+  function extractYouTubeVideoId(urlOrStr) {
+    if (!urlOrStr || typeof urlOrStr !== 'string') return null;
+    try {
+      const vMatch = urlOrStr.match(/[?&]v=([a-zA-Z0-9_-]{11})(?:[&?]|$)/);
+      if (vMatch) return vMatch[1];
+      const shortsMatch = urlOrStr.match(/\/shorts\/([a-zA-Z0-9_-]{11})(?:[/?#]|$)/);
+      if (shortsMatch) return shortsMatch[1];
+      const embedMatch = urlOrStr.match(/\/embed\/([a-zA-Z0-9_-]{11})(?:[/?#]|$)/);
+      if (embedMatch) return embedMatch[1];
+      const beMatch = urlOrStr.match(/youtu\.be\/([a-zA-Z0-9_-]{11})(?:[/?#]|$)/);
+      if (beMatch) return beMatch[1];
+      const docidMatch = urlOrStr.match(/[?&]docid=([a-zA-Z0-9_-]{11})(?:[&?]|$)/);
+      if (docidMatch) return docidMatch[1];
+      if (/^[a-zA-Z0-9_-]{11}$/.test(urlOrStr)) return urlOrStr;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  function cleanProgressiveUrl(url) {
+    if (!url || typeof url !== 'string') return url;
+    if (url.includes('googlevideo.com/videoplayback') || url.includes('/videoplayback')) {
+      try {
+        const parsed = new URL(url);
+        parsed.searchParams.delete('range');
+        parsed.searchParams.delete('rn');
+        parsed.searchParams.delete('rbuf');
+        return parsed.toString();
+      } catch (e) {
+        return url
+          .replace(/([?&])range=[^&]*/g, '$1')
+          .replace(/([?&])rn=[^&]*/g, '$1')
+          .replace(/([?&])rbuf=[^&]*/g, '$1')
+          .replace(/[?&]&+/g, '&')
+          .replace(/\?&/, '?')
+          .replace(/[?&]$/, '');
+      }
+    }
+    return url;
+  }
+
+  function extractStreamKey(url) {
+    if (!url || typeof url !== 'string') return '';
+    if (isNonMediaUrl(url)) return '';
+
+    try {
+      const ytId = extractYouTubeVideoId(url);
+      if (ytId) return ytId;
+
+      if (url.includes('googlevideo.com/videoplayback') || url.includes('/videoplayback')) {
+        const docidMatch = url.match(/[?&]docid=([a-zA-Z0-9_-]{11})/i);
+        if (docidMatch) return docidMatch[1];
+        const idMatch = url.match(/[?&]id=([a-zA-Z0-9_-]+)/i);
+        if (idMatch) return idMatch[1];
+      }
+
+      if (url.includes('/playlist/vid/')) {
+        const after = url.split('/playlist/vid/')[1].split('?')[0];
+        const parts = after.split('/').filter(Boolean);
+        for (const part of parts) {
+          if (/^(v2|dash|mp4|hls|beta|vms|segment)$/i.test(part)) continue;
+          if (/^[A-Za-z0-9_-]{8,}$/.test(part)) return part;
+        }
+      }
+
+      const urnMatch = url.match(/(?:digitalmediaAsset|fs_video|video|dms):([A-Za-z0-9_-]{8,})/i);
+      if (urnMatch) return urnMatch[1];
+
+      const twMatch = url.match(/(?:ext_tw_video|amplify_video)\/(\d+)/i);
+      if (twMatch) return `tw_${twMatch[1]}`;
+
+      const rdMatch = url.match(/v\.redd\.it\/([a-zA-Z0-9_-]+)/i);
+      if (rdMatch) return `rd_${rdMatch[1]}`;
+
+      const clean = url.split('?')[0].toLowerCase();
+      if (clean.endsWith('.m4s') || clean.endsWith('.ts') || clean.endsWith('.mpd') || clean.endsWith('.m3u8')) {
+        const parsed = new URL(url, 'https://unknown.stream');
+        const segments = parsed.pathname.split('/').filter(Boolean);
+        if (segments.length > 1) segments.pop();
+        return `${parsed.hostname}/${segments.join('/')}`;
+      }
+
+      return '';
+    } catch {
+      return '';
+    }
+  }
+
   function isNonMediaUrl(url) {
     if (!url || typeof url !== 'string') return true;
     const clean = url.split('?')[0].toLowerCase();
@@ -66,6 +155,19 @@
     ) {
       return false;
     }
+
+    // YouTube progressive videoplayback itags (18 = 360p, 22 = 720p, 37 = 1080p, 38, 43)
+    if (clean.includes('googlevideo.com/videoplayback') || clean.includes('/videoplayback')) {
+      const itagMatch = url.match(/[?&]itag=(\d+)/);
+      if (itagMatch) {
+        const itag = parseInt(itagMatch[1], 10);
+        if ([18, 22, 37, 38, 43].includes(itag)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
     return (
       clean.endsWith('.mp4') ||
       clean.endsWith('.webm') ||
@@ -85,6 +187,12 @@
     if (isNonMediaUrl(url)) return false;
     if (isGenuineProgressiveMp4Url(url)) return false;
     const clean = url.split('?')[0].toLowerCase();
+
+    // YouTube non-progressive videoplayback chunks are treated as segment streams
+    if (clean.includes('googlevideo.com/videoplayback') || clean.includes('/videoplayback')) {
+      return true;
+    }
+
     return (
       clean.endsWith('.m4s') ||
       clean.endsWith('.ts') ||
@@ -321,6 +429,196 @@
     return results;
   }
 
+  const activeYouTubeStreams = new Map();
+
+  function getActiveYouTubeVideoId() {
+    return extractYouTubeVideoId(location.href) ||
+      (document.getElementById('movie_player')?.getVideoData?.()?.video_id) ||
+      (window.ytInitialPlayerResponse?.videoDetails?.videoId) ||
+      null;
+  }
+
+  function handleYouTubeVideoplayback(url) {
+    try {
+      const itagMatch = url.match(/[?&]itag=(\d+)/);
+      const itag = itagMatch ? parseInt(itagMatch[1], 10) : 0;
+      const docidMatch = url.match(/[?&]docid=([a-zA-Z0-9_-]{11})/i);
+      const currentVideoId = (docidMatch ? docidMatch[1] : null) || getActiveYouTubeVideoId();
+      if (!currentVideoId) return;
+
+      let record = activeYouTubeStreams.get(currentVideoId);
+      if (!record) {
+        record = { videoId: currentVideoId, progressiveUrl: null, videoUrl: null, audioUrl: null, lastSeen: Date.now() };
+        activeYouTubeStreams.set(currentVideoId, record);
+      }
+      record.lastSeen = Date.now();
+
+      const cleaned = cleanProgressiveUrl(url);
+
+      if ([18, 22, 37, 38, 43].includes(itag)) {
+        record.progressiveUrl = cleaned;
+        record.itag = itag;
+
+        const meta = {
+          videoId: currentVideoId,
+          mediaKey: currentVideoId,
+          entityUrn: `urn:youtube:video:${currentVideoId}`,
+          allKeys: [currentVideoId, `yt_${currentVideoId}`, `urn:youtube:video:${currentVideoId}`],
+          progressiveUrl: cleaned,
+          isYouTube: true,
+          timestamp: Date.now()
+        };
+
+        const existingIdx = cachedMetadata.findIndex(m => m.videoId === currentVideoId || m.mediaKey === currentVideoId);
+        if (existingIdx >= 0) {
+          cachedMetadata[existingIdx] = { ...cachedMetadata[existingIdx], ...meta };
+        } else {
+          cachedMetadata.push(meta);
+          if (cachedMetadata.length > 60) cachedMetadata.shift();
+        }
+
+        window.dispatchEvent(new CustomEvent('__GARRETT_METADATA_DISCOVERED__', { detail: meta }));
+      } else if (itag === 140) {
+        record.audioUrl = cleaned;
+      } else if ([137, 136, 135, 134, 160].includes(itag)) {
+        record.videoUrl = cleaned;
+      }
+    } catch (e) {}
+  }
+
+  function inspectYouTubePlayer() {
+    try {
+      if (!location.hostname.includes('youtube.com') && !location.hostname.includes('youtu.be')) {
+        return null;
+      }
+
+      let playerResponse = null;
+      const moviePlayer = document.getElementById('movie_player');
+      if (moviePlayer && typeof moviePlayer.getPlayerResponse === 'function') {
+        try {
+          playerResponse = moviePlayer.getPlayerResponse();
+        } catch (e) {}
+      }
+
+      if (!playerResponse && window.ytInitialPlayerResponse) {
+        playerResponse = window.ytInitialPlayerResponse;
+      }
+
+      if (!playerResponse) {
+        const watchFlexy = document.querySelector('ytd-watch-flexy');
+        if (watchFlexy && watchFlexy.playerData) {
+          playerResponse = watchFlexy.playerData;
+        }
+      }
+
+      if (!playerResponse || typeof playerResponse !== 'object') {
+        return null;
+      }
+
+      const videoDetails = playerResponse.videoDetails || {};
+      const videoId = videoDetails.videoId ||
+        (moviePlayer && typeof moviePlayer.getVideoData === 'function' ? moviePlayer.getVideoData()?.video_id : null) ||
+        extractYouTubeVideoId(location.href);
+      if (!videoId) return null;
+
+      const title = videoDetails.title ||
+        (moviePlayer && typeof moviePlayer.getVideoData === 'function' ? moviePlayer.getVideoData()?.title : null) ||
+        document.title.replace(/ - YouTube.*$/i, '').trim();
+
+      const rawDur = videoDetails.lengthSeconds ||
+        (moviePlayer && typeof moviePlayer.getDuration === 'function' ? moviePlayer.getDuration() : 0);
+      const duration = parseFloat(rawDur) || null;
+
+      const streamingData = playerResponse.streamingData || {};
+      const formats = Array.isArray(streamingData.formats) ? streamingData.formats : [];
+      const adaptiveFormats = Array.isArray(streamingData.adaptiveFormats) ? streamingData.adaptiveFormats : [];
+
+      let bestProgUrl = null;
+      let bestProgHeight = 0;
+      let bestProgBitrate = 0;
+
+      for (const fmt of formats) {
+        if (!fmt) continue;
+        const u = fmt.url;
+        if (u && typeof u === 'string') {
+          const cleanU = cleanProgressiveUrl(u);
+          const h = fmt.height || (fmt.qualityLabel && parseInt(fmt.qualityLabel, 10)) || 0;
+          const br = fmt.bitrate || 0;
+          if (h > bestProgHeight || (h === bestProgHeight && br > bestProgBitrate)) {
+            bestProgUrl = cleanU;
+            bestProgHeight = h;
+            bestProgBitrate = br;
+          }
+        }
+      }
+
+      const activeStream = activeYouTubeStreams.get(videoId);
+      if (!bestProgUrl && activeStream && activeStream.progressiveUrl) {
+        bestProgUrl = activeStream.progressiveUrl;
+      }
+
+      const hlsUrl = streamingData.hlsManifestUrl || null;
+      const dashUrl = streamingData.dashManifestUrl || null;
+
+      const adaptiveVideo = [];
+      const adaptiveAudio = [];
+      for (const af of adaptiveFormats) {
+        if (!af || !af.url) continue;
+        const mime = String(af.mimeType || '').toLowerCase();
+        if (mime.startsWith('video/')) {
+          adaptiveVideo.push({
+            url: cleanProgressiveUrl(af.url),
+            itag: af.itag,
+            height: af.height || 0,
+            width: af.width || 0,
+            bitrate: af.bitrate || 0,
+            mimeType: af.mimeType
+          });
+        } else if (mime.startsWith('audio/')) {
+          adaptiveAudio.push({
+            url: cleanProgressiveUrl(af.url),
+            itag: af.itag,
+            bitrate: af.bitrate || 0,
+            mimeType: af.mimeType
+          });
+        }
+      }
+
+      if (bestProgUrl || hlsUrl || dashUrl || adaptiveVideo.length > 0 || videoId) {
+        const meta = {
+          videoId,
+          title,
+          duration,
+          progressiveUrl: bestProgUrl || null,
+          manifestUrl: hlsUrl || dashUrl || null,
+          hlsUrl,
+          dashUrl,
+          adaptiveVideo,
+          adaptiveAudio,
+          mediaKey: videoId,
+          entityUrn: `urn:youtube:video:${videoId}`,
+          allKeys: [videoId, `yt_${videoId}`, `urn:youtube:video:${videoId}`],
+          isYouTube: true,
+          timestamp: Date.now()
+        };
+
+        const existingIdx = cachedMetadata.findIndex(m => m.videoId === videoId || m.mediaKey === videoId);
+        if (existingIdx >= 0) {
+          cachedMetadata[existingIdx] = { ...cachedMetadata[existingIdx], ...meta };
+        } else {
+          cachedMetadata.push(meta);
+          if (cachedMetadata.length > 60) cachedMetadata.shift();
+        }
+
+        window.dispatchEvent(new CustomEvent('__GARRETT_METADATA_DISCOVERED__', { detail: meta }));
+        return meta;
+      }
+    } catch (err) {
+      console.warn('[Garrett] inspectYouTubePlayer error:', err);
+    }
+    return null;
+  }
+
   // 1. Hook window.fetch
   if (typeof window.fetch === 'function') {
     const originalFetch = window.fetch;
@@ -334,9 +632,14 @@
       }
 
       if (url) {
+        if (url.includes('googlevideo.com/videoplayback') || url.includes('/videoplayback')) {
+          handleYouTubeVideoplayback(url);
+        }
+
         if (isProgressiveMp4Url(url)) {
+          const progUrl = cleanProgressiveUrl(url);
           window.dispatchEvent(new CustomEvent('__GARRETT_PROGRESSIVE_DETECTED__', {
-            detail: { url, timestamp: Date.now() }
+            detail: { url: progUrl, timestamp: Date.now() }
           }));
         } else if (isSegmentUrl(url)) {
           cachedSegments.push({ url, timestamp: Date.now() });
@@ -423,9 +726,14 @@
     XMLHttpRequest.prototype.send = function () {
       const url = this.__garrett_req_url;
       if (url) {
+        if (url.includes('googlevideo.com/videoplayback') || url.includes('/videoplayback')) {
+          handleYouTubeVideoplayback(url);
+        }
+
         if (isProgressiveMp4Url(url)) {
+          const progUrl = cleanProgressiveUrl(url);
           window.dispatchEvent(new CustomEvent('__GARRETT_PROGRESSIVE_DETECTED__', {
-            detail: { url, timestamp: Date.now() }
+            detail: { url: progUrl, timestamp: Date.now() }
           }));
         } else if (isSegmentUrl(url)) {
           cachedSegments.push({ url, timestamp: Date.now() });
@@ -648,7 +956,15 @@
     return null;
   }
 
+  window.addEventListener('__GARRETT_QUERY_YOUTUBE_STREAM__', () => {
+    inspectYouTubePlayer();
+  });
+
   window.addEventListener('__GARRETT_QUERY_REACT_STREAM__', (e) => {
+    if (typeof location !== 'undefined' && (location.hostname.includes('youtube.com') || location.hostname.includes('youtu.be'))) {
+      inspectYouTubePlayer();
+    }
+
     if (!e.detail) return;
     const videoId = e.detail.videoId;
     const blobUrl = e.detail.blobUrl;
@@ -688,6 +1004,10 @@
   });
 
   window.addEventListener('__GARRETT_REQUEST_CACHED_TELEMETRY__', () => {
+    if (typeof location !== 'undefined' && (location.hostname.includes('youtube.com') || location.hostname.includes('youtu.be'))) {
+      inspectYouTubePlayer();
+    }
+
     for (const b of cachedBlobs) {
       window.dispatchEvent(new CustomEvent('__GARRETT_BLOB_CREATED__', { detail: b }));
     }
@@ -701,5 +1021,23 @@
       window.dispatchEvent(new CustomEvent('__GARRETT_SEGMENT_DETECTED__', { detail: s }));
     }
   });
+
+  if (typeof location !== 'undefined' && (location.hostname.includes('youtube.com') || location.hostname.includes('youtu.be'))) {
+    window.addEventListener('yt-navigate-finish', () => {
+      setTimeout(inspectYouTubePlayer, 300);
+    });
+    window.addEventListener('yt-player-updated', () => {
+      setTimeout(inspectYouTubePlayer, 300);
+    });
+    document.addEventListener('loadstart', (e) => {
+      if (e.target && e.target.tagName === 'VIDEO') {
+        setTimeout(inspectYouTubePlayer, 300);
+      }
+    }, true);
+
+    setTimeout(inspectYouTubePlayer, 500);
+    setTimeout(inspectYouTubePlayer, 1500);
+    setTimeout(inspectYouTubePlayer, 3500);
+  }
 })();
 

@@ -56,6 +56,28 @@ function isNonMediaUrl(url, contentType = '') {
   );
 }
 
+function cleanProgressiveUrl(url) {
+  if (!url || typeof url !== 'string') return url;
+  if (url.includes('googlevideo.com/videoplayback') || url.includes('/videoplayback')) {
+    try {
+      const parsed = new URL(url);
+      parsed.searchParams.delete('range');
+      parsed.searchParams.delete('rn');
+      parsed.searchParams.delete('rbuf');
+      return parsed.toString();
+    } catch {
+      return url
+        .replace(/([?&])range=[^&]*/g, '$1')
+        .replace(/([?&])rn=[^&]*/g, '$1')
+        .replace(/([?&])rbuf=[^&]*/g, '$1')
+        .replace(/[?&]&+/g, '&')
+        .replace(/\?&/, '?')
+        .replace(/[?&]$/, '');
+    }
+  }
+  return url;
+}
+
 // Sniff video requests across all tabs
 chrome.webRequest.onResponseStarted.addListener(
   (details) => {
@@ -144,7 +166,18 @@ chrome.webRequest.onResponseStarted.addListener(
     }
 
     // 3. Detect Progressive MP4 Streams
-    const isProgressiveMp4 =
+    let isYtProgressive = false;
+    if (cleanUrl.includes('googlevideo.com/videoplayback') || cleanUrl.includes('/videoplayback')) {
+      const itagMatch = url.match(/[?&]itag=(\d+)/);
+      if (itagMatch) {
+        const itag = parseInt(itagMatch[1], 10);
+        if ([18, 22, 37, 38, 43].includes(itag)) {
+          isYtProgressive = true;
+        }
+      }
+    }
+
+    const isProgressiveMp4 = isYtProgressive || (
       (cleanUrl.includes('/playlist/vid/v2/') || cleanUrl.includes('/playlist/vid/')) &&
       !cleanUrl.includes('/dash/') &&
       !cleanUrl.includes('/hls/') &&
@@ -155,13 +188,15 @@ chrome.webRequest.onResponseStarted.addListener(
       !cleanUrl.endsWith('.mpd') &&
       !cleanUrl.endsWith('.m3u8') &&
       !/\/[0-9]+\/[0-9]+$/.test(cleanUrl) &&
-      !cleanUrl.includes('videocover');
+      !cleanUrl.includes('videocover')
+    );
 
     if (isProgressiveMp4) {
+      const finalProgUrl = cleanProgressiveUrl(url);
       updateBadgeForTab(details.tabId);
       chrome.tabs.sendMessage(details.tabId, {
         action: 'progressiveDiscovered',
-        url
+        url: finalProgUrl
       }).catch(() => {});
       return;
     }

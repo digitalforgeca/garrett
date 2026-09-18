@@ -148,6 +148,19 @@
   opacity: 1 !important;
 }
 
+.vbs-overlay-btn.vbs-youtube-overlay {
+  top: 16px !important;
+  right: 64px !important;
+  z-index: 2147483647 !important;
+}
+
+.vbs-overlay-btn.vbs-shorts-overlay {
+  top: 16px !important;
+  left: 16px !important;
+  right: auto !important;
+  z-index: 2147483647 !important;
+}
+
 /* Persistent Recording Banner on Top of Video */
 .vbs-recording-banner {
   position: absolute;

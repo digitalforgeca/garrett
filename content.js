@@ -60,6 +60,19 @@
     ) {
       return false;
     }
+
+    // YouTube progressive videoplayback itags (18 = 360p, 22 = 720p, 37 = 1080p, 38, 43)
+    if (clean.includes('googlevideo.com/videoplayback') || clean.includes('/videoplayback')) {
+      const itagMatch = url.match(/[?&]itag=(\d+)/);
+      if (itagMatch) {
+        const itag = parseInt(itagMatch[1], 10);
+        if ([18, 22, 37, 38, 43].includes(itag)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
     return (
       clean.endsWith('.mp4') ||
       clean.endsWith('.webm') ||
@@ -134,9 +147,61 @@
     }
   }
 
+  function extractYouTubeVideoId(urlOrStr) {
+    if (!urlOrStr || typeof urlOrStr !== 'string') return null;
+    try {
+      const vMatch = urlOrStr.match(/[?&]v=([a-zA-Z0-9_-]{11})(?:[&?]|$)/);
+      if (vMatch) return vMatch[1];
+      const shortsMatch = urlOrStr.match(/\/shorts\/([a-zA-Z0-9_-]{11})(?:[/?#]|$)/);
+      if (shortsMatch) return shortsMatch[1];
+      const embedMatch = urlOrStr.match(/\/embed\/([a-zA-Z0-9_-]{11})(?:[/?#]|$)/);
+      if (embedMatch) return embedMatch[1];
+      const beMatch = urlOrStr.match(/youtu\.be\/([a-zA-Z0-9_-]{11})(?:[/?#]|$)/);
+      if (beMatch) return beMatch[1];
+      const docidMatch = urlOrStr.match(/[?&]docid=([a-zA-Z0-9_-]{11})(?:[&?]|$)/);
+      if (docidMatch) return docidMatch[1];
+      if (/^[a-zA-Z0-9_-]{11}$/.test(urlOrStr)) return urlOrStr;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  function cleanProgressiveUrl(url) {
+    if (!url || typeof url !== 'string') return url;
+    if (url.includes('googlevideo.com/videoplayback') || url.includes('/videoplayback')) {
+      try {
+        const parsed = new URL(url);
+        parsed.searchParams.delete('range');
+        parsed.searchParams.delete('rn');
+        parsed.searchParams.delete('rbuf');
+        return parsed.toString();
+      } catch (e) {
+        return url
+          .replace(/([?&])range=[^&]*/g, '$1')
+          .replace(/([?&])rn=[^&]*/g, '$1')
+          .replace(/([?&])rbuf=[^&]*/g, '$1')
+          .replace(/[?&]&+/g, '&')
+          .replace(/\?&/, '?')
+          .replace(/[?&]$/, '');
+      }
+    }
+    return url;
+  }
+
   const extractStreamKey = (typeof window.GarrettQueue !== 'undefined' && window.GarrettQueue.extractStreamKey) || function (url) {
     if (!url || typeof url !== 'string') return '';
     try {
+      const ytId = extractYouTubeVideoId(url);
+      if (ytId) return ytId;
+
+      if (url.includes('googlevideo.com/videoplayback') || url.includes('/videoplayback')) {
+        const docidMatch = url.match(/[?&]docid=([a-zA-Z0-9_-]{11})/i);
+        if (docidMatch) return docidMatch[1];
+        const idMatch = url.match(/[?&]id=([a-zA-Z0-9_-]+)/i);
+        if (idMatch) return idMatch[1];
+      }
+
       if (url.includes('/playlist/vid/')) {
         const after = url.split('/playlist/vid/')[1].split('?')[0];
         const parts = after.split('/').filter(Boolean);
@@ -155,7 +220,7 @@
 
   function cleanEntityKey(key) {
     if (!key) return '';
-    return String(key).replace(/^urn:li:[^:]+:/i, '').trim();
+    return String(key).replace(/^(?:urn:(?:li|youtube):[^:]+:|yt_)/i, '').trim();
   }
 
   function entityKeysMatch(key1, key2) {
@@ -411,9 +476,20 @@
   }
 
   function generateFilename(video, extension = 'mp4') {
-    let title = document.title || 'video';
-    title = title.replace(/[/\\?%*:|"<>]/g, '-').trim();
-    if (title.length > 40) title = title.substring(0, 40);
+    let title = '';
+    const isYouTube = location.hostname.includes('youtube.com') || location.hostname.includes('youtu.be');
+    if (isYouTube) {
+      const ytTitleEl = document.querySelector('h1.ytd-watch-metadata yt-formatted-string, #title h1, h1.title, ytd-reel-video-renderer h2.title');
+      if (ytTitleEl && ytTitleEl.textContent) {
+        title = ytTitleEl.textContent.trim();
+      }
+    }
+    if (!title) {
+      title = document.title || 'video';
+    }
+    title = title.replace(/\s*-\s*YouTube.*$/i, '').replace(/[/\\?%*:|"<>]/g, '-').trim();
+    if (title.length > 50) title = title.substring(0, 50).trim();
+    if (!title) title = 'video';
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     return `${title}_${timestamp}.${extension}`;
   }
@@ -470,6 +546,40 @@
       allKeys: new Set()
     };
     if (!video) return info;
+
+    // 0. YouTube detection: Watch page, Shorts, or Embeds
+    const isYouTube = location.hostname.includes('youtube.com') || location.hostname.includes('youtu.be') || !!video.closest('#movie_player, .html5-video-player');
+    if (isYouTube) {
+      let ytId = null;
+      const shortsContainer = video.closest('ytd-reel-video-renderer, shorts-video, ytd-shorts');
+      if (shortsContainer) {
+        const link = shortsContainer.querySelector('a[href*="/shorts/"], a[href*="/watch?v="]');
+        if (link) {
+          const href = link.getAttribute('href') || '';
+          ytId = extractYouTubeVideoId(href);
+        }
+      }
+      if (!ytId) {
+        ytId = extractYouTubeVideoId(location.href);
+      }
+      if (!ytId) {
+        const moviePlayer = video.closest('#movie_player, .html5-video-player') || document.getElementById('movie_player');
+        if (moviePlayer) {
+          const vidData = moviePlayer.getAttribute('data-video-id');
+          if (vidData) ytId = vidData;
+        }
+      }
+
+      if (ytId) {
+        info.mediaKey = ytId;
+        info.primaryKey = ytId;
+        info.activityUrn = `yt_${ytId}`;
+        info.allKeys.add(ytId);
+        info.allKeys.add(`yt_${ytId}`);
+        info.allKeys.add(`urn:youtube:video:${ytId}`);
+        return info;
+      }
+    }
 
     // 1. Find player wrapper and post container
     const playerWrapper = video.closest('.feed-shared-linkedin-video, .video-js, [class*="player"]') || video.parentElement;
@@ -1160,20 +1270,35 @@
 
   function createOverlayUI(state) {
     const video = state.video;
-    const parent = video.parentElement;
+    const parent = video ? video.parentElement : null;
     if (!parent) return;
 
-    const parentPos = window.getComputedStyle(parent).position;
+    const isYouTube = location.hostname.includes('youtube.com') || location.hostname.includes('youtu.be') || !!(video && video.closest('#movie_player, .html5-video-player'));
+    const isShorts = isYouTube && (location.pathname.includes('/shorts/') || !!(video && video.closest('ytd-reel-video-renderer, shorts-video, ytd-shorts')));
+
+    let targetParent = parent;
+    if (isYouTube) {
+      const ytPlayer = video.closest('#movie_player, .html5-video-player');
+      if (ytPlayer) targetParent = ytPlayer;
+    }
+
+    const parentPos = window.getComputedStyle(targetParent).position;
     if (parentPos === 'static') {
-      parent.style.position = 'relative';
+      targetParent.style.position = 'relative';
     }
 
     // Clean up any existing overlay buttons on this specific parent
-    parent.querySelectorAll('.vbs-overlay-btn, .vbs-btn-group, .vbs-action-pill').forEach(el => el.remove());
+    targetParent.querySelectorAll('.vbs-overlay-btn, .vbs-btn-group, .vbs-action-pill').forEach(el => el.remove());
 
     // Single sleek action button: [ Keep Video ] with open hand icon
     const btn = document.createElement('button');
     btn.className = 'vbs-overlay-btn';
+    if (isYouTube) {
+      btn.classList.add('vbs-youtube-overlay');
+      if (isShorts) {
+        btn.classList.add('vbs-shorts-overlay');
+      }
+    }
     btn.setAttribute('data-video-id', state.id);
     btn.title = 'Keep this video directly to MP4 in background';
     btn.innerHTML = `
@@ -1192,7 +1317,7 @@
       keepVideoNow(state);
     });
 
-    parent.appendChild(btn);
+    targetParent.appendChild(btn);
     state.overlayBtn = btn;
     state.mainBtn = btn;
 
@@ -1277,11 +1402,18 @@
       }
     }
 
-    // Trigger immediate React Fiber query
+    // Trigger immediate React Fiber or YouTube query
     if (currentSrc.startsWith('blob:') || !state.progressiveUrl) {
-      window.dispatchEvent(new CustomEvent('__GARRETT_QUERY_REACT_STREAM__', {
-        detail: { videoId: state.id, blobUrl: currentSrc }
-      }));
+      const isYouTube = location.hostname.includes('youtube.com') || location.hostname.includes('youtu.be') || !!(video && video.closest('#movie_player, .html5-video-player'));
+      if (isYouTube) {
+        window.dispatchEvent(new CustomEvent('__GARRETT_QUERY_YOUTUBE_STREAM__', {
+          detail: { videoId: state.id, mediaKey: state.mediaKey }
+        }));
+      } else {
+        window.dispatchEvent(new CustomEvent('__GARRETT_QUERY_REACT_STREAM__', {
+          detail: { videoId: state.id, blobUrl: currentSrc }
+        }));
+      }
     }
 
     // Fast Path 1: Check React Stream Cache
@@ -1367,11 +1499,18 @@
       duration: duration
     };
 
-    // Trigger React Fiber query to pageHook in MAIN world
+    // Trigger React Fiber or YouTube query to pageHook in MAIN world
     if (currentSrc.startsWith('blob:')) {
-      window.dispatchEvent(new CustomEvent('__GARRETT_QUERY_REACT_STREAM__', {
-        detail: { videoId: state.id, blobUrl: currentSrc }
-      }));
+      const isYouTube = location.hostname.includes('youtube.com') || location.hostname.includes('youtu.be') || !!(video && video.closest('#movie_player, .html5-video-player'));
+      if (isYouTube) {
+        window.dispatchEvent(new CustomEvent('__GARRETT_QUERY_YOUTUBE_STREAM__', {
+          detail: { videoId: state.id, mediaKey: state.mediaKey }
+        }));
+      } else {
+        window.dispatchEvent(new CustomEvent('__GARRETT_QUERY_REACT_STREAM__', {
+          detail: { videoId: state.id, blobUrl: currentSrc }
+        }));
+      }
     }
 
     const startTime = Date.now();
@@ -2264,6 +2403,17 @@
   // Initial scan
   scanForVideos();
   window.dispatchEvent(new CustomEvent('__GARRETT_REQUEST_CACHED_TELEMETRY__'));
+
+  // YouTube SPA navigation listeners
+  if (typeof window !== 'undefined') {
+    window.addEventListener('yt-navigate-finish', () => {
+      setTimeout(scanForVideos, 300);
+      setTimeout(scanForVideos, 1200);
+    });
+    window.addEventListener('yt-player-updated', () => {
+      setTimeout(scanForVideos, 300);
+    });
+  }
 
   // Listen to messages from popup or background
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {

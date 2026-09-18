@@ -34,7 +34,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         await chrome.scripting.executeScript({
           target: { tabId, allFrames: true },
-          files: ['keeper.js', 'streamAssembler.js', 'garrettQueue.js', 'content.js']
+          files: ['mux.min.js', 'keeper.js', 'streamAssembler.js', 'garrettQueue.js', 'content.js']
         });
       } catch (err) {
         console.warn('[Garrett] Script injection check:', err);
