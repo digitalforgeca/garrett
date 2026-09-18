@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Garrett — Video Keeper",
-  "version": "1.8.1",
+  "version": "1.8.2",
   "description": "Invisibly captures, stitches, and saves ephemeral blob video streams directly to complete MP4 files with sound.",
   "permissions": [
     "downloads",
