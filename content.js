@@ -427,18 +427,25 @@
       parent.style.position = 'relative';
     }
 
-    // Sleek download action button with SVG icon
+    // Clean up any existing overlay buttons across ancestors to guarantee zero duplicates
+    let ancestor = parent;
+    for (let depth = 0; depth < 3 && ancestor; depth++) {
+      ancestor.querySelectorAll('.vbs-overlay-btn, #vbs-main-btn, .vbs-btn-group, .vbs-action-pill').forEach(el => el.remove());
+      ancestor = ancestor.parentElement;
+    }
+
+    // Single sleek action button: [ Keep Video ]
     const btn = document.createElement('button');
     btn.className = 'vbs-overlay-btn';
     btn.id = 'vbs-main-btn';
-    btn.title = 'Keep video directly to MP4 in background';
+    btn.title = 'Keep this video directly to MP4 in background';
     btn.innerHTML = `
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
         <polyline points="7 10 12 15 17 10"/>
         <line x1="12" y1="15" x2="12" y2="3"/>
       </svg>
-      <span class="vbs-btn-text" style="display: none;"></span>
+      <span class="vbs-btn-text">Keep Video</span>
     `;
 
     btn.addEventListener('click', (e) => {
@@ -706,7 +713,6 @@
   }
 
   async function downloadStreamInPage(state, streamUrl, manifestText = '') {
-    if (state.isDownloading) return;
     state.isDownloading = true;
 
     const textEl = state.mainBtn ? state.mainBtn.querySelector('.vbs-btn-text') : null;
@@ -773,36 +779,26 @@
       safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
 
       if (textEl) {
-        textEl.style.display = 'inline';
         textEl.textContent = 'Kept!';
         setTimeout(() => {
-          if (textEl) {
-            textEl.textContent = '';
-            textEl.style.display = 'none';
-          }
+          if (textEl) textEl.textContent = 'Keep Video';
         }, 4000);
       }
     } catch (err) {
       console.error('[Garrett] Stream download error:', err);
       showToast(`Stream download error: ${err.message}`, 5000);
-      if (textEl) {
-        textEl.textContent = '';
-        textEl.style.display = 'none';
-      }
+      safeSendMessage({ action: 'streamError', videoId: state.id, error: err.message });
+      if (textEl) textEl.textContent = 'Keep Video';
     } finally {
       state.isDownloading = false;
     }
   }
 
   async function downloadFromSegmentQueue(state, segmentUrls) {
-    if (state.isDownloading) return;
     state.isDownloading = true;
 
     const textEl = state.mainBtn ? state.mainBtn.querySelector('.vbs-btn-text') : null;
-    if (textEl) {
-      textEl.style.display = 'inline';
-      textEl.textContent = '0%';
-    }
+    if (textEl) textEl.textContent = '0%';
 
     try {
       const assembler = window.GarrettStreamAssembler || globalThis.GarrettStreamAssembler;
@@ -828,10 +824,7 @@
       };
 
       const onProgress = (completed, total, pct) => {
-        if (textEl) {
-          textEl.style.display = 'inline';
-          textEl.textContent = `${pct}%`;
-        }
+        if (textEl) textEl.textContent = `${pct}%`;
         safeSendMessage({ action: 'streamProgress', videoId: state.id, completed, total, pct });
       };
 
@@ -845,22 +838,16 @@
       safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
 
       if (textEl) {
-        textEl.style.display = 'inline';
         textEl.textContent = 'Kept!';
         setTimeout(() => {
-          if (textEl) {
-            textEl.textContent = '';
-            textEl.style.display = 'none';
-          }
+          if (textEl) textEl.textContent = 'Keep Video';
         }, 4000);
       }
     } catch (err) {
       console.error('[Garrett] Segment queue download error:', err);
       showToast(`Segment assembly error: ${err.message}`, 5000);
-      if (textEl) {
-        textEl.textContent = '';
-        textEl.style.display = 'none';
-      }
+      safeSendMessage({ action: 'streamError', videoId: state.id, error: err.message });
+      if (textEl) textEl.textContent = 'Keep Video';
     } finally {
       state.isDownloading = false;
     }
@@ -871,6 +858,7 @@
       showToast('Garrett is already preserving this stream...');
       return;
     }
+    state.isDownloading = true;
 
     const quoteObj = keeper ? keeper.getRandomKeeperQuote() : null;
     if (quoteObj) {
@@ -886,6 +874,12 @@
     }
 
     try {
+      // 0. Fast Path: If manifestUrl is already known or attached, keep immediately
+      if (state.manifestUrl) {
+        await downloadStreamInPage(state, state.manifestUrl, state.manifestXml || '');
+        return;
+      }
+
       // 1. Resolve stream via Garrett Multi-Tier Discovery
       const stream = await resolveStreamForVideo(state, 2500);
 
@@ -907,8 +901,8 @@
         }, async (resp) => {
           if (resp && resp.success) {
             showToast(`"What was taken is now safely kept." — Garrett (${filename})`, 6000);
+            safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
             if (textEl) {
-              textEl.style.display = 'inline';
               textEl.textContent = 'Kept!';
             }
           } else {
@@ -918,23 +912,18 @@
               const blob = await r.blob();
               downloadBlobDirectly(blob, filename);
               showToast(`"What was taken is now safely kept." — Garrett (${filename})`, 6000);
+              safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
               if (textEl) {
-                textEl.style.display = 'inline';
                 textEl.textContent = 'Kept!';
               }
             } catch (err) {
               showToast(`Download error: ${err.message}`);
-              if (textEl) {
-                textEl.textContent = '';
-                textEl.style.display = 'none';
-              }
+              safeSendMessage({ action: 'streamError', videoId: state.id, error: err.message });
+              if (textEl) textEl.textContent = 'Keep Video';
             }
           }
           setTimeout(() => {
-            if (textEl) {
-              textEl.textContent = '';
-              textEl.style.display = 'none';
-            }
+            if (textEl) textEl.textContent = 'Keep Video';
           }, 4000);
         });
         return;
@@ -947,21 +936,18 @@
       }
 
       // Path 3: Direct standalone MP4/WebM URL on video tag
-      const src = state.video.currentSrc || state.video.src || '';
+      const src = state.video ? (state.video.currentSrc || state.video.src || '') : '';
       if (src && !src.startsWith('blob:')) {
         const ext = src.split('.').pop().split(/[?#]/)[0] || 'mp4';
         const filename = generateFilename(state.video, ext);
         safeSendMessage({ action: 'downloadUrl', url: src, filename, saveAs: false });
         showToast(`Downloading ${filename}...`);
+        safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
         if (textEl) {
-          textEl.style.display = 'inline';
           textEl.textContent = 'Kept!';
         }
         setTimeout(() => {
-          if (textEl) {
-            textEl.textContent = '';
-            textEl.style.display = 'none';
-          }
+          if (textEl) textEl.textContent = 'Keep Video';
         }, 3000);
         return;
       }
@@ -989,7 +975,7 @@
 
       // Path 4: Complete Segment Queue (ONLY if segment count represents >= 85% of duration!)
       if (stream && stream.allSegments && stream.allSegments.length > 0) {
-        const duration = state.video.duration || 0;
+        const duration = (state.video && state.video.duration) || 0;
         const expectedMinSegments = duration > 10 ? Math.floor((duration / 4) * 0.85) : 2;
 
         if (stream.allSegments.length >= expectedMinSegments) {
@@ -1009,15 +995,12 @@
               const filename = generateFilename(state.video, 'mp4');
               safeSendMessage({ action: 'downloadUrl', url: name, filename, saveAs: false });
               showToast(`Downloading full video: ${filename}...`);
+              safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
               if (textEl) {
-                textEl.style.display = 'inline';
                 textEl.textContent = 'Kept!';
               }
               setTimeout(() => {
-                if (textEl) {
-                  textEl.textContent = '';
-                  textEl.style.display = 'none';
-                }
+                if (textEl) textEl.textContent = 'Keep Video';
               }, 4000);
               return;
             }
@@ -1037,18 +1020,14 @@
       } catch (e) {}
 
       // STRICT PROTECTION: NEVER save 4-second partial cuts!
-      showToast('Stream is buffering. Please play 2-3 seconds of the video so Garrett can lock onto the stream, then click download.', 5500);
-      if (textEl) {
-        textEl.textContent = '';
-        textEl.style.display = 'none';
-      }
+      showToast('Stream is buffering. Please play 2-3 seconds of the video so Garrett can lock onto the stream, then click Keep Video.', 5500);
+      safeSendMessage({ action: 'streamError', videoId: state.id, error: 'Stream buffering: Play 2s of video first' });
+      if (textEl) textEl.textContent = 'Keep Video';
     } catch (err) {
       console.error('[Garrett] keepVideoNow error:', err);
       showToast(`Error keeping video: ${err.message}`, 5000);
-      if (textEl) {
-        textEl.textContent = '';
-        textEl.style.display = 'none';
-      }
+      safeSendMessage({ action: 'streamError', videoId: state.id, error: err.message });
+      if (textEl) textEl.textContent = 'Keep Video';
     } finally {
       state.isDownloading = false;
     }
@@ -1118,8 +1097,21 @@
     }
 
     if (request.action === 'harvestVideo' || request.action === 'keepVideo') {
-      const state = Array.from(videoRegistry.values()).find(s => s.id === request.videoId) ||
-                    Array.from(videoRegistry.values())[0];
+      let state = Array.from(videoRegistry.values()).find(s => s.id === request.videoId) ||
+                  Array.from(videoRegistry.values())[0];
+      if (!state && request.streamUrl) {
+        state = {
+          id: request.videoId || `vbs-ext-${Date.now()}`,
+          video: null,
+          entityKey: '',
+          poster: '',
+          progressiveUrl: null,
+          manifestUrl: null,
+          isDownloading: false,
+          overlayBtn: null,
+          mainBtn: null
+        };
+      }
       if (state) {
         if (request.streamUrl) {
           if (request.streamUrl.includes('.mpd') || request.streamUrl.includes('/dash/') || request.streamUrl.includes('.m3u8')) {
@@ -1131,9 +1123,11 @@
         if (request.manifestXml) {
           state.manifestXml = request.manifestXml;
         }
-        keepVideoNow(state)
-          .then((res) => sendResponse({ success: true, ...res }))
-          .catch((err) => sendResponse({ success: false, error: err.message }));
+        sendResponse({ success: true, started: true });
+        keepVideoNow(state).catch((err) => {
+          console.error('[Garrett] keepVideoNow failed:', err);
+          safeSendMessage({ action: 'streamError', videoId: state.id, error: err.message });
+        });
       } else {
         sendResponse({ success: false, error: 'Video not found' });
       }
