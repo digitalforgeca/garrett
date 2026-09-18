@@ -1155,6 +1155,8 @@
     if (domInfo.primaryKey) state.entityKey = domInfo.primaryKey;
     const entityKey = state.mediaKey || state.entityKey;
     state.entityKey = entityKey;
+    const duration = resolveRealVideoDuration(state);
+
     // Fast Path -1: Direct progressive URL discovered from DOM data-sources attribute
     if (domInfo.progressiveUrl && isGenuineProgressiveMp4Url(domInfo.progressiveUrl)) {
       state.progressiveUrl = domInfo.progressiveUrl;
