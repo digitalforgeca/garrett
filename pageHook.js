@@ -336,7 +336,7 @@
       try {
         response = await originalFetch.apply(this, args);
       } catch (fetchErr) {
-        if (typeof url === 'string' && url.startsWith('chrome-extension://invalid')) {
+        if (typeof url === 'string' && (url.startsWith('chrome-extension://invalid') || url.startsWith('chrome-extension://'))) {
           return new Response('', { status: 404, statusText: 'Extension Invalidated' });
         }
         throw fetchErr;

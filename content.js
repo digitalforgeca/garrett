@@ -1442,6 +1442,9 @@
           if (r.ok) return await r.arrayBuffer();
           throw new Error(`HTTP ${r.status}`);
         } catch (e) {
+          if (e && e.message && (e.message.includes('404') || e.message.includes('410'))) {
+            throw e;
+          }
           const bg = await safeSendMessage({ action: 'fetchBuffer', url });
           if (bg && bg.success && bg.data) {
             const bin = atob(bg.data);
@@ -1668,6 +1671,9 @@
           if (r.ok) return await r.arrayBuffer();
           throw new Error(`HTTP ${r.status}`);
         } catch (e) {
+          if (e && e.message && (e.message.includes('404') || e.message.includes('410'))) {
+            throw e;
+          }
           const bg = await safeSendMessage({ action: 'fetchBuffer', url });
           if (bg && bg.success && bg.data) {
             const bin = atob(bg.data);
