@@ -30,6 +30,7 @@
       clean.includes('.mpd') ||
       clean.endsWith('.m3u8') ||
       clean.includes('.m3u8') ||
+      clean.includes('/dash/') ||
       clean.endsWith('/dash') ||
       clean.includes('playlist.mpd') ||
       clean.includes('manifest')

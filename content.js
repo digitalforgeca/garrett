@@ -1197,7 +1197,9 @@
                 streamKey: state.entityKey
               };
             }
-            if (!state.manifestUrl && (name.includes('.mpd') || name.includes('.m3u8') || (name.includes('/playlist/vid/') && name.includes('manifest'))) && !name.includes('.m4s') && !name.includes('.ts')) {
+            const isDashOrHls = (name.includes('.mpd') || name.includes('/dash/') || name.includes('.m3u8') || (name.includes('/playlist/vid/') && name.includes('manifest'))) &&
+              !name.includes('.m4s') && !name.includes('.ts') && !name.includes('.init') && !name.includes('/init') && !/\/[0-9]+\/[0-9]+(?:\?|$)/.test(name);
+            if (!state.manifestUrl && isDashOrHls) {
               if (queue) queue.registerManifest(name);
               state.manifestUrl = name;
             }
@@ -1627,14 +1629,45 @@
       }
 
       // Path 2: Full Manifest Stream (DASH or HLS assembled)
-      const manifestUrl = (stream && stream.url) || state.manifestUrl;
+      let manifestUrl = (stream && stream.url) || state.manifestUrl;
+      let manifestXml = (stream && stream.manifestXml) || state.manifestXml || '';
+
+      // If manifest URL was not yet set, scan performance resource entries BEFORE segment queue
+      if (!manifestUrl) {
+        try {
+          const resEntries = performance.getEntriesByType('resource');
+          for (let i = resEntries.length - 1; i >= 0; i--) {
+            const name = resEntries[i].name;
+            if (isNonMediaUrl(name)) continue;
+            const isDashOrHls = (name.includes('.mpd') || name.includes('/dash/') || name.includes('.m3u8') || (name.includes('/playlist/vid/') && name.includes('manifest'))) &&
+              !name.includes('.m4s') && !name.includes('.ts') && !name.includes('.init') && !name.includes('/init') && !/\/[0-9]+\/[0-9]+(?:\?|$)/.test(name);
+            if (isDashOrHls) {
+              const isClaimedByOther = Array.from(videoRegistry.values()).some(other => other !== state && (other.progressiveUrl === name || other.manifestUrl === name));
+              if (isClaimedByOther) continue;
+
+              let matchesKey = state.entityKey ? entityKeysMatch(state.entityKey, name) : false;
+              if (!matchesKey && state.allKeys) {
+                for (const k of state.allKeys) {
+                  if (entityKeysMatch(k, name)) { matchesKey = true; break; }
+                }
+              }
+              if (matchesKey || videoRegistry.size === 1) {
+                manifestUrl = name;
+                state.manifestUrl = name;
+                if (queue) queue.registerManifest(name);
+                break;
+              }
+            }
+          }
+        } catch (e) {}
+      }
+
       if (manifestUrl) {
         try {
-          const manifestXml = (stream && stream.manifestXml) || state.manifestXml || '';
           await downloadStreamInPage(state, manifestUrl, manifestXml);
           return;
         } catch (streamErr) {
-          console.warn('[Garrett] Manifest download failed, engaging segment synthesis crawler:', streamErr.message);
+          console.warn('[Garrett] Manifest download failed, falling back to segment queue:', streamErr.message);
         }
       }
 

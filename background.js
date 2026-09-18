@@ -81,12 +81,15 @@ chrome.webRequest.onResponseStarted.addListener(
     if (isNonMediaUrl(url, contentType)) return;
 
     // 1. FIRST: Detect Stream Manifests (MPEG-DASH or HLS)
-    const isDash =
+    const isSegmentFile = cleanUrl.endsWith('.m4s') || cleanUrl.endsWith('.ts') || cleanUrl.endsWith('.init') || cleanUrl.includes('init.mp4') || /\/[0-9]+\/[0-9]+(?:\?|$)/.test(url);
+    const isDash = !isSegmentFile && (
       contentType.includes('dash+xml') ||
       cleanUrl.endsWith('.mpd') ||
       cleanUrl.includes('.mpd') ||
+      cleanUrl.includes('/dash/') ||
       cleanUrl.endsWith('/dash') ||
-      (cleanUrl.includes('playlist.mpd'));
+      cleanUrl.includes('playlist.mpd')
+    );
 
     const isHls =
       contentType.includes('application/vnd.apple.mpegurl') ||
