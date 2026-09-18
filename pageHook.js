@@ -112,6 +112,13 @@
           }
         }
       }
+      const singleLoc = item.streamingLocation || item.location;
+      if (singleLoc) {
+        const u = (typeof singleLoc === 'object') ? singleLoc.url : (typeof singleLoc === 'string' ? singleLoc : null);
+        if (u && typeof u === 'string' && isGenuineProgressiveMp4Url(u)) {
+          return { url: u, width: item.width, height: item.height, bitRate: item.bitRate };
+        }
+      }
       if (item.url && typeof item.url === 'string' && isGenuineProgressiveMp4Url(item.url)) {
         return { url: item.url, width: item.width, height: item.height, bitRate: item.bitRate };
       }
@@ -122,21 +129,47 @@
   function parseVideoMetadata(metaObj) {
     if (!metaObj || typeof metaObj !== 'object') return null;
     const vpm = metaObj.videoPlayMetadata || metaObj.videoPlayMetadataV2 || metaObj;
-    const bestProg = getBestProgressiveUrl(vpm.progressiveStreams);
-    const dashUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'DASH' || s.url?.includes('dash') || s.url?.includes('.mpd'))?.url;
-    const hlsUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'HLS' || s.url?.includes('m3u8'))?.url;
+    const bestProg = getBestProgressiveUrl(vpm.progressiveStreams || metaObj.progressiveStreams);
+    const adaptive = vpm.adaptiveStreams || metaObj.adaptiveStreams;
+    const dashUrl = adaptive?.find(s => s.protocol === 'DASH' || s.url?.includes('dash') || s.url?.includes('.mpd'))?.url;
+    const hlsUrl = adaptive?.find(s => s.protocol === 'HLS' || s.url?.includes('m3u8'))?.url;
     const manifestUrl = dashUrl || hlsUrl || (typeof vpm.manifestUrl === 'string' ? vpm.manifestUrl : null);
     const progUrl = bestProg ? bestProg.url : (typeof vpm.progressiveUrl === 'string' && isGenuineProgressiveMp4Url(vpm.progressiveUrl) ? vpm.progressiveUrl : null);
-    const dur = vpm.duration ? (vpm.duration > 1000 ? vpm.duration / 1000 : vpm.duration) : null;
-    const entityUrn = vpm.entityUrn || vpm.mediaUrn || metaObj.entityUrn || null;
+    const rawDur = vpm.duration || vpm.durationMs || vpm.durationInSeconds || metaObj.duration || metaObj.durationMs || 0;
+    const dur = rawDur ? (rawDur > 1000 ? rawDur / 1000 : rawDur) : null;
+    const entityUrn = vpm.entityUrn || vpm.mediaUrn || metaObj.entityUrn || metaObj.mediaUrn || metaObj.urn || null;
 
-    if (progUrl || manifestUrl) {
+    if (progUrl || manifestUrl || dur) {
+      const allKeys = new Set();
+      const checkUrn = (val) => {
+        if (!val || typeof val !== 'string') return;
+        allKeys.add(val);
+        const m1 = val.match(/(?:digitalmediaAsset|fs_video|video|dms):([A-Za-z0-9_-]{8,})/i);
+        if (m1) allKeys.add(m1[1]);
+        const m2 = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
+        if (m2) allKeys.add(m2[1]);
+        const m3 = val.match(/([CD]\d{2}[A-Za-z0-9_-]{8,})/);
+        if (m3) allKeys.add(m3[1]);
+      };
+
+      checkUrn(vpm.entityUrn);
+      checkUrn(vpm.mediaUrn);
+      checkUrn(metaObj.entityUrn);
+      checkUrn(metaObj.mediaUrn);
+      checkUrn(metaObj.urn);
+      checkUrn(metaObj['$id']);
+
+      const mediaKey = (vpm.mediaUrn || vpm.entityUrn || metaObj.mediaUrn || metaObj.entityUrn || '')
+        .replace(/^urn:li:[^:]+:/i, '').trim();
+
       return {
         progressiveUrl: progUrl,
         manifestUrl: manifestUrl,
         dashUrl: dashUrl || null,
         hlsUrl: hlsUrl || null,
         entityUrn: entityUrn,
+        mediaKey: mediaKey || null,
+        allKeys: Array.from(allKeys),
         duration: dur
       };
     }
@@ -392,32 +425,33 @@
   }
 
   function inspectObjectForVideo(obj, depth = 0, visited = new WeakSet()) {
-    if (!obj || depth > 5 || typeof obj !== 'object') return null;
+    if (!obj || depth > 12 || typeof obj !== 'object') return null;
     if (obj instanceof (typeof Node !== 'undefined' ? Node : Object) && obj.nodeType) return null;
     if (obj === window || obj === document) return null;
     if (visited.has(obj)) return null;
     visited.add(obj);
 
     const parsed = parseVideoMetadata(obj);
-    if (parsed) return parsed;
+    if (parsed && (parsed.progressiveUrl || parsed.manifestUrl)) return parsed;
 
     // Fast-path prioritized keys used by LinkedIn React video components
     const priorityKeys = [
       'videoPlayMetadata', 'videoPlayMetadataV2', 'progressiveStreams', 'adaptiveStreams',
+      'videoComponent', 'feedSharedLinkedinVideo', 'feedSharedVideo', 'videoPlayer',
       'video', 'media', 'playMetadata', 'item', 'content', 'data',
-      'playerProps', 'metadata', 'feedSharedVideo'
+      'playerProps', 'playerState', 'metadata', 'vpm', 'update', 'included', 'elements'
     ];
     for (const k of priorityKeys) {
       if (k in obj && obj[k] && typeof obj[k] === 'object') {
         const res = inspectObjectForVideo(obj[k], depth + 1, visited);
-        if (res) return res;
+        if (res && (res.progressiveUrl || res.manifestUrl)) return res;
       }
     }
 
     for (const k of Object.keys(obj)) {
       if (
         k === '_owner' || k === 'alternate' || k === 'child' || k === 'sibling' ||
-        k === 'return' || k === 'stateNode' || k === 'memoizedState' || k === 'dependencies' ||
+        k === 'return' || k === 'dependencies' ||
         k === 'ref' || k === 'updater' || k.startsWith('__react') || priorityKeys.includes(k)
       ) {
         continue;
@@ -426,55 +460,83 @@
         const val = obj[k];
         if (val && typeof val === 'object') {
           const res = inspectObjectForVideo(val, depth + 1, visited);
-          if (res) return res;
+          if (res && (res.progressiveUrl || res.manifestUrl)) return res;
         }
       } catch (e) {}
     }
-    return null;
+    return parsed;
   }
 
   function findReactVideoMetadata(element) {
     if (!element) return null;
     const visited = new WeakSet();
 
-    // 1. Check DOM Element and parent __reactProps$
-    let curr = element;
-    let d = 0;
-    while (curr && d < 12) {
-      try {
-        const propKey = Object.keys(curr).find(k => k.startsWith('__reactProps$'));
-        if (propKey && curr[propKey]) {
-          const meta = inspectObjectForVideo(curr[propKey], 0, visited);
-          if (meta) return meta;
-        }
-      } catch (e) {}
-      curr = curr.parentElement;
-      d++;
+    const candidateRoots = [element];
+    const topContainer = element.closest('.feed-shared-update-v2, .occludable-update, [data-urn*="activity"], [data-urn*="ugcPost"], [data-entity-urn], article, .feed-shared-linkedin-video');
+    if (topContainer && !candidateRoots.includes(topContainer)) {
+      candidateRoots.push(topContainer);
     }
 
-    // 2. Direct Fiber Walk: Ascend component tree via fiber.return
-    let fiberNode = element;
-    let fDepth = 0;
-    let fiber = null;
-    while (fiberNode && fDepth < 4) {
-      const fiberKey = Object.keys(fiberNode).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
-      if (fiberKey && fiberNode[fiberKey]) {
-        fiber = fiberNode[fiberKey];
-        break;
+    for (const rootEl of candidateRoots) {
+      // 1. Check DOM Element and ancestors for __reactProps$
+      let curr = rootEl;
+      let d = 0;
+      while (curr && d < 20) {
+        try {
+          const propKey = Object.keys(curr).find(k => k.startsWith('__reactProps$'));
+          if (propKey && curr[propKey]) {
+            const meta = inspectObjectForVideo(curr[propKey], 0, visited);
+            if (meta && (meta.progressiveUrl || meta.manifestUrl)) return meta;
+          }
+        } catch (e) {}
+        curr = curr.parentElement;
+        d++;
       }
-      fiberNode = fiberNode.parentElement;
-      fDepth++;
-    }
 
-    if (fiber) {
-      let fCount = 0;
-      while (fiber && fCount < 30) {
-        if (fiber.memoizedProps) {
-          const meta = inspectObjectForVideo(fiber.memoizedProps, 0, visited);
-          if (meta) return meta;
+      // 2. Direct Fiber Walk: Ascend component tree via fiber.return
+      let fiberNode = rootEl;
+      let fDepth = 0;
+      let fiber = null;
+      while (fiberNode && fDepth < 20) {
+        const fiberKey = Object.keys(fiberNode).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+        if (fiberKey && fiberNode[fiberKey]) {
+          fiber = fiberNode[fiberKey];
+          break;
         }
-        fiber = fiber.return;
-        fCount++;
+        fiberNode = fiberNode.parentElement;
+        fDepth++;
+      }
+
+      if (fiber) {
+        let fCount = 0;
+        while (fiber && fCount < 60) {
+          if (fiber.memoizedProps) {
+            const meta = inspectObjectForVideo(fiber.memoizedProps, 0, visited);
+            if (meta && (meta.progressiveUrl || meta.manifestUrl)) return meta;
+          }
+          if (fiber.pendingProps) {
+            const meta = inspectObjectForVideo(fiber.pendingProps, 0, visited);
+            if (meta && (meta.progressiveUrl || meta.manifestUrl)) return meta;
+          }
+          if (fiber.stateNode && typeof fiber.stateNode === 'object' && !(fiber.stateNode instanceof (typeof Node !== 'undefined' ? Node : Object))) {
+            const meta = inspectObjectForVideo(fiber.stateNode, 0, visited);
+            if (meta && (meta.progressiveUrl || meta.manifestUrl)) return meta;
+          }
+          if (fiber.memoizedState) {
+            let hook = fiber.memoizedState;
+            let hCount = 0;
+            while (hook && hCount < 20) {
+              if (hook.memoizedState) {
+                const meta = inspectObjectForVideo(hook.memoizedState, 0, visited);
+                if (meta && (meta.progressiveUrl || meta.manifestUrl)) return meta;
+              }
+              hook = hook.next;
+              hCount++;
+            }
+          }
+          fiber = fiber.return;
+          fCount++;
+        }
       }
     }
 
@@ -482,31 +544,42 @@
   }
 
   window.addEventListener('__GARRETT_QUERY_REACT_STREAM__', (e) => {
-    if (e.detail && e.detail.blobUrl) {
+    if (!e.detail) return;
+    const videoId = e.detail.videoId;
+    const blobUrl = e.detail.blobUrl;
+    let targetVideo = null;
+
+    if (videoId) {
+      targetVideo = document.querySelector(`video[data-garrett-video-id="${videoId}"]`);
+    }
+    if (!targetVideo && blobUrl) {
       const allVideos = document.querySelectorAll('video');
-      let targetVideo = null;
       for (const v of allVideos) {
-        if (v.currentSrc === e.detail.blobUrl || v.src === e.detail.blobUrl) {
+        if (v.currentSrc === blobUrl || v.src === blobUrl) {
           targetVideo = v;
           break;
         }
       }
-      if (!targetVideo && allVideos.length === 1) {
+    }
+    if (!targetVideo) {
+      const allVideos = document.querySelectorAll('video');
+      if (allVideos.length === 1) {
         targetVideo = allVideos[0];
       }
+    }
 
-      if (targetVideo) {
-        const meta = findReactVideoMetadata(targetVideo);
-        if (meta) {
-          window.dispatchEvent(new CustomEvent('__GARRETT_REACT_STREAM_FOUND__', {
-            detail: {
-              videoId: e.detail.videoId,
-              blobUrl: e.detail.blobUrl,
-              ...meta
-            }
-          }));
-        }
+    if (targetVideo) {
+      const meta = findReactVideoMetadata(targetVideo);
+      if (meta) {
+        window.dispatchEvent(new CustomEvent('__GARRETT_REACT_STREAM_FOUND__', {
+          detail: {
+            videoId: videoId || targetVideo.getAttribute('data-garrett-video-id') || null,
+            blobUrl: blobUrl || targetVideo.currentSrc || targetVideo.src || null,
+            ...meta
+          }
+        }));
       }
     }
   });
 })();
+

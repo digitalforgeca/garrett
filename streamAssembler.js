@@ -676,9 +676,9 @@
       }
     }
 
-    // Validate fMP4 structure: Must have at least 1 init header and 1 media segment
-    if (validBuffers.length === 1 && total > 1) {
-      throw new Error('Incomplete stream: Only captured 1 fragment. Play more of the video before keeping.');
+    // Validate fMP4 structure: Fragmented MP4 streams require at least 1 init header and 1 media segment, or multiple segments
+    if (validBuffers.length <= 1 && !options.allowSingleSegment) {
+      throw new Error('Incomplete stream: Only 1 segment captured. Please play 2-3 more seconds so Garrett can lock onto the stream.');
     }
 
     const blob = new Blob(validBuffers, { type: mimeType });
