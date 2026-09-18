@@ -164,6 +164,41 @@
     }
   });
 
+  const discoveredMetadataCache = [];
+
+  window.addEventListener('__GARRETT_METADATA_DISCOVERED__', (e) => {
+    if (e.detail) {
+      const meta = e.detail;
+      discoveredMetadataCache.push(meta);
+      if (discoveredMetadataCache.length > 60) discoveredMetadataCache.shift();
+
+      for (const state of videoRegistry.values()) {
+        const v = state.video;
+        const matches = (meta.entityUrn && state.entityKey && entityKeysMatch(state.entityKey, meta.entityUrn)) ||
+                        (meta.mediaKey && state.mediaKey && entityKeysMatch(state.mediaKey, meta.mediaKey)) ||
+                        (meta.allKeys && state.entityKey && meta.allKeys.some(k => entityKeysMatch(state.entityKey, k))) ||
+                        (state.allKeys && meta.entityUrn && Array.from(state.allKeys).some(k => entityKeysMatch(k, meta.entityUrn))) ||
+                        (v && (!v.paused || v.currentTime > 0)) ||
+                        videoRegistry.size === 1;
+
+        if (matches) {
+          if (meta.progressiveUrl && !state.progressiveUrl) {
+            state.progressiveUrl = meta.progressiveUrl;
+          }
+          if (meta.manifestUrl && !state.manifestUrl) {
+            state.manifestUrl = meta.manifestUrl;
+          }
+          if (meta.duration && meta.duration > 0 && (!state.duration || state.duration <= 5)) {
+            state.duration = meta.duration;
+          }
+          if (meta.entityUrn && !state.entityKey) {
+            state.entityKey = meta.entityUrn;
+          }
+        }
+      }
+    }
+  });
+
   window.addEventListener('__GARRETT_REACT_STREAM_FOUND__', (e) => {
     if (e.detail && e.detail.blobUrl) {
       reactStreamCache.set(e.detail.blobUrl, e.detail);
@@ -179,6 +214,7 @@
           if (e.detail.progressiveUrl) state.progressiveUrl = e.detail.progressiveUrl;
           if (e.detail.manifestUrl) state.manifestUrl = e.detail.manifestUrl;
           if (e.detail.entityUrn && !state.entityKey) state.entityKey = e.detail.entityUrn;
+          if (e.detail.duration && (!state.duration || state.duration <= 5)) state.duration = e.detail.duration;
         }
       }
       if (e.detail.manifestUrl && queue) {
@@ -378,32 +414,66 @@
   }
 
   /**
-   * Scrapes visible player timer text from DOM to determine ground-truth duration,
-   * bypassing MSE buffered window limitations (e.g. 4.0s).
+   * Scrapes visible player timer text and seekbar attributes from DOM to determine
+   * ground-truth presentation duration, bypassing MSE buffered window limitations (e.g. 4.0s).
    */
   function extractVideoDurationFromDom(video) {
     if (!video) return 0;
     try {
       const container = video.closest('.feed-shared-update-v2, [data-urn], [data-id], article, .feed-shared-linkedin-video, div[data-id], .occludable-update') || video.parentElement;
       if (!container) return 0;
-      const candidates = container.querySelectorAll('time, [class*="duration"], [class*="time"], [aria-label*="duration"], [aria-label*="time"], [class*="vjs-"]');
+
       let maxSec = 0;
-      for (const el of candidates) {
-        let text = (el.textContent || '').trim();
-        if (text.length > 25) continue;
-        if (text.includes('/')) {
-          const parts = text.split('/');
-          text = parts[parts.length - 1].trim();
-        }
-        const matches = [...text.matchAll(/\b(?:(\d+):)?(\d+):(\d{2})\b/g)];
-        for (const m of matches) {
-          const hours = m[1] ? parseInt(m[1], 10) : 0;
-          const mins = parseInt(m[2], 10);
-          const secs = parseInt(m[3], 10);
-          const total = hours * 3600 + mins * 60 + secs;
-          if (total > maxSec) maxSec = total;
+
+      // 1. Check progress sliders and range inputs (e.g., aria-valuemax="84")
+      const sliders = container.querySelectorAll('[role="slider"], input[type="range"], [class*="progress"], [class*="seekbar"]');
+      for (const s of sliders) {
+        const vMax = parseFloat(s.getAttribute('aria-valuemax') || s.getAttribute('max') || '0');
+        if (vMax > maxSec && isFinite(vMax)) maxSec = vMax;
+      }
+
+      // 2. Check candidate timer text across container and direct video parents
+      const searchRoots = [container];
+      if (video.parentElement && !container.contains(video.parentElement)) {
+        searchRoots.push(video.parentElement);
+      }
+      const playerWrapper = video.closest('.video-js, [class*="player"], .feed-shared-linkedin-video');
+      if (playerWrapper && !searchRoots.includes(playerWrapper)) {
+        searchRoots.push(playerWrapper);
+      }
+
+      for (const root of searchRoots) {
+        const candidates = root.querySelectorAll('time, span, div, p, [aria-label*="duration"], [aria-label*="time"]');
+        for (const el of candidates) {
+          const aria = el.getAttribute('aria-label') || '';
+          if (aria && aria.length < 50) {
+            const ariaMatches = [...aria.matchAll(/\b(?:(\d+):)?(\d{1,2}):(\d{2})\b/g)];
+            for (const m of ariaMatches) {
+              const hours = m[1] ? parseInt(m[1], 10) : 0;
+              const mins = parseInt(m[2], 10);
+              const secs = parseInt(m[3], 10);
+              const total = hours * 3600 + mins * 60 + secs;
+              if (total > maxSec) maxSec = total;
+            }
+          }
+
+          let text = (el.textContent || '').trim();
+          if (!text || text.length > 35) continue;
+          if (text.includes('/')) {
+            const parts = text.split('/');
+            text = parts[parts.length - 1].trim();
+          }
+          const matches = [...text.matchAll(/\b(?:(\d+):)?(\d{1,2}):(\d{2})\b/g)];
+          for (const m of matches) {
+            const hours = m[1] ? parseInt(m[1], 10) : 0;
+            const mins = parseInt(m[2], 10);
+            const secs = parseInt(m[3], 10);
+            const total = hours * 3600 + mins * 60 + secs;
+            if (total > maxSec) maxSec = total;
+          }
         }
       }
+
       if (maxSec > 3) return maxSec;
     } catch (e) {}
     return 0;
@@ -411,6 +481,7 @@
 
   /**
    * Resolves true presentation duration across DOM UI, embedded metadata, and video tag.
+   * If video is streaming via MSE blob:, NEVER treats <= 5.0s (initial buffer window) as the presentation duration.
    */
   function resolveRealVideoDuration(state) {
     const domDur = state && state.video ? extractVideoDurationFromDom(state.video) : 0;
@@ -421,10 +492,18 @@
     if (state && state.duration && state.duration > 5 && isFinite(state.duration)) {
       return state.duration;
     }
-    if (state && state.video && typeof state.video.duration === 'number' && isFinite(state.video.duration) && state.video.duration > 5) {
-      return state.video.duration;
+    const vidDur = (state && state.video && typeof state.video.duration === 'number' && isFinite(state.video.duration))
+      ? state.video.duration
+      : 0;
+
+    const isBlob = state && state.video && (state.video.currentSrc || state.video.src || '').startsWith('blob:');
+    if (vidDur > 5) {
+      return vidDur;
     }
-    return (state ? state.duration : 0) || domDur || (state && state.video && isFinite(state.video.duration) ? state.video.duration : 0) || 0;
+    if (!isBlob && vidDur > 0) {
+      return vidDur;
+    }
+    return 0;
   }
 
   function matchesVideoMetadata(videoState, meta) {
@@ -588,19 +667,19 @@
       mainBtn: null
     };
 
-    // Pre-check embedded JSON for immediate progressive/manifest URL attachment
+    // Pre-check discovered network metadata and embedded JSON for immediate progressive/manifest URL attachment
     try {
-      const allMeta = extractAllEmbeddedVideoMetadata();
+      const allMeta = [...discoveredMetadataCache, ...extractAllEmbeddedVideoMetadata()];
       for (const m of allMeta) {
-        if (matchesVideoMetadata(state, m)) {
+        if (matchesVideoMetadata(state, m) || (allMeta.length === 1 && !state.progressiveUrl)) {
           if (m.progressiveUrl) state.progressiveUrl = m.progressiveUrl;
           if (m.manifestUrl) state.manifestUrl = m.manifestUrl;
           if (m.mediaKey) state.mediaKey = m.mediaKey;
-          if (m.duration && m.duration > 0) state.duration = m.duration;
+          if (m.duration && m.duration > 0 && (!state.duration || state.duration <= 5)) state.duration = m.duration;
           if (m.mediaKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
             state.entityKey = m.mediaKey;
           }
-          break;
+          if (m.progressiveUrl) break;
         }
       }
     } catch (e) {}
@@ -685,23 +764,20 @@
       parent.style.position = 'relative';
     }
 
-    // Clean up any existing overlay buttons across ancestors to guarantee zero duplicates
-    let ancestor = parent;
-    for (let depth = 0; depth < 3 && ancestor; depth++) {
-      ancestor.querySelectorAll('.vbs-overlay-btn, #vbs-main-btn, .vbs-btn-group, .vbs-action-pill').forEach(el => el.remove());
-      ancestor = ancestor.parentElement;
-    }
+    // Clean up any existing overlay buttons on this specific parent
+    parent.querySelectorAll('.vbs-overlay-btn, .vbs-btn-group, .vbs-action-pill').forEach(el => el.remove());
 
-    // Single sleek action button: [ Keep Video ]
+    // Single sleek action button: [ Keep Video ] with open hand icon
     const btn = document.createElement('button');
     btn.className = 'vbs-overlay-btn';
-    btn.id = 'vbs-main-btn';
+    btn.setAttribute('data-video-id', state.id);
     btn.title = 'Keep this video directly to MP4 in background';
     btn.innerHTML = `
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-        <polyline points="7 10 12 15 17 10"/>
-        <line x1="12" y1="15" x2="12" y2="3"/>
+        <path d="M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2"/>
+        <path d="M14 10V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2"/>
+        <path d="M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8"/>
+        <path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>
       </svg>
       <span class="vbs-btn-text">Keep Video</span>
     `;
@@ -769,9 +845,9 @@
       }
     }
 
-    // Fast Path 2: Check Embedded DOM JSON (<code id*="bpr-guid">)
+    // Fast Path 2: Check Discovered Network Metadata & Embedded DOM JSON
     try {
-      const allMeta = extractAllEmbeddedVideoMetadata();
+      const allMeta = [...discoveredMetadataCache, ...extractAllEmbeddedVideoMetadata()];
       for (const m of allMeta) {
         const keyMatch = matchesVideoMetadata(state, m);
         const singleMatch = allMeta.length === 1 || videoRegistry.size <= 1;
@@ -780,7 +856,7 @@
           if (m.mediaKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
             state.entityKey = m.mediaKey;
           }
-          if (m.duration && m.duration > 0) {
+          if (m.duration && m.duration > 0 && (!state.duration || state.duration <= 5)) {
             state.duration = m.duration;
           }
           if (m.progressiveUrl) {

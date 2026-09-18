@@ -63,6 +63,109 @@
     );
   }
 
+  function getBestProgressiveUrl(progressiveStreams) {
+    if (!Array.isArray(progressiveStreams) || progressiveStreams.length === 0) return null;
+    const sorted = progressiveStreams.slice().sort((a, b) => {
+      const resA = (a.width || 0) * (a.height || 0);
+      const resB = (b.width || 0) * (b.height || 0);
+      if (resA !== resB) return resB - resA;
+      return (b.bitRate || 0) - (a.bitRate || 0);
+    });
+    const best = sorted[0];
+    const loc = best?.streamingLocations?.[0]?.url ||
+                (typeof best?.streamingLocations?.[0] === 'string' ? best.streamingLocations[0] : null) ||
+                best?.url;
+    return loc ? { url: loc, width: best.width, height: best.height, bitRate: best.bitRate } : null;
+  }
+
+  function parseVideoMetadata(metaObj) {
+    if (!metaObj || typeof metaObj !== 'object') return null;
+    const vpm = metaObj.videoPlayMetadata || metaObj;
+    const bestProg = getBestProgressiveUrl(vpm.progressiveStreams);
+    const dashUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'DASH' || s.url?.includes('dash') || s.url?.includes('.mpd'))?.url;
+    const hlsUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'HLS' || s.url?.includes('m3u8'))?.url;
+    const manifestUrl = dashUrl || hlsUrl || (typeof vpm.manifestUrl === 'string' ? vpm.manifestUrl : null);
+    const progUrl = bestProg ? bestProg.url : (typeof vpm.progressiveUrl === 'string' ? vpm.progressiveUrl : null);
+    const dur = vpm.duration ? (vpm.duration > 1000 ? vpm.duration / 1000 : vpm.duration) : null;
+    const entityUrn = vpm.entityUrn || vpm.mediaUrn || metaObj.entityUrn || null;
+
+    if (progUrl || manifestUrl) {
+      return {
+        progressiveUrl: progUrl,
+        manifestUrl: manifestUrl,
+        dashUrl: dashUrl || null,
+        hlsUrl: hlsUrl || null,
+        entityUrn: entityUrn,
+        duration: dur
+      };
+    }
+    return null;
+  }
+
+  function scanJsonForVideoMetadata(json) {
+    if (!json || typeof json !== 'object') return [];
+    const results = [];
+    const collected = [];
+
+    function scan(node, depth = 0) {
+      if (!node || depth > 8 || typeof node !== 'object') return;
+      if (node.videoPlayMetadata && typeof node.videoPlayMetadata === 'object') {
+        collected.push({ parent: node, vpm: node.videoPlayMetadata });
+      }
+      if (Array.isArray(node.progressiveStreams) || Array.isArray(node.adaptiveStreams)) {
+        collected.push({ parent: node, vpm: node });
+      }
+      if (Array.isArray(node)) {
+        for (let i = 0; i < node.length && i < 80; i++) scan(node[i], depth + 1);
+      } else {
+        const keys = Object.keys(node);
+        for (let i = 0; i < keys.length && i < 50; i++) {
+          const k = keys[i];
+          if (k === 'videoPlayMetadata') continue;
+          scan(node[k], depth + 1);
+        }
+      }
+    }
+
+    scan(json);
+
+    for (const item of collected) {
+      const vpm = item.vpm;
+      const parent = item.parent || {};
+      const parsed = parseVideoMetadata(vpm);
+      if (parsed) {
+        const allKeys = new Set();
+        const checkUrn = (val) => {
+          if (!val || typeof val !== 'string') return;
+          allKeys.add(val);
+          const m1 = val.match(/(?:digitalmediaAsset|fs_video|video|dms):([A-Za-z0-9_-]{8,})/i);
+          if (m1) allKeys.add(m1[1]);
+          const m2 = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
+          if (m2) allKeys.add(m2[1]);
+        };
+
+        checkUrn(vpm.entityUrn);
+        checkUrn(vpm.mediaUrn);
+        checkUrn(parent.entityUrn);
+        checkUrn(parent.urn);
+        checkUrn(parent['$id']);
+        for (const [k, v] of Object.entries(parent)) {
+          if (typeof v === 'string' && (v.includes('urn:li:') || v.length > 10)) {
+            checkUrn(v);
+          }
+        }
+
+        results.push({
+          ...parsed,
+          allKeys: Array.from(allKeys),
+          entityUrn: parsed.entityUrn || vpm.entityUrn || parent.entityUrn || parent.urn || null
+        });
+      }
+    }
+
+    return results;
+  }
+
   // 1. Hook window.fetch
   if (typeof window.fetch === 'function') {
     const originalFetch = window.fetch;
@@ -107,6 +210,29 @@
               }
             }).catch(() => {});
           } catch (e) {}
+        } else if (
+          contentType.includes('application/json') ||
+          contentType.includes('application/graphql') ||
+          url.includes('/voyager/') ||
+          url.includes('/graphql') ||
+          url.includes('/feed/')
+        ) {
+          try {
+            const cloned = response.clone();
+            cloned.text().then((text) => {
+              if (text && (text.includes('videoPlayMetadata') || text.includes('progressiveStreams') || text.includes('adaptiveStreams'))) {
+                try {
+                  const json = JSON.parse(text);
+                  const metas = scanJsonForVideoMetadata(json);
+                  for (const m of metas) {
+                    window.dispatchEvent(new CustomEvent('__GARRETT_METADATA_DISCOVERED__', {
+                      detail: { ...m, timestamp: Date.now() }
+                    }));
+                  }
+                } catch (e) {}
+              }
+            }).catch(() => {});
+          } catch (e) {}
         }
       }
 
@@ -137,7 +263,8 @@
           }));
         }
 
-        if (isManifestUrl(url)) {
+        const isManifest = isManifestUrl(url);
+        if (isManifest || url.includes('/voyager/') || url.includes('/graphql') || url.includes('/feed/')) {
           this.addEventListener('load', () => {
             try {
               if (this.status >= 200 && this.status < 300 && this.responseText) {
@@ -146,6 +273,16 @@
                   window.dispatchEvent(new CustomEvent('__GARRETT_MANIFEST_CONTENT__', {
                     detail: { url, text, timestamp: Date.now() }
                   }));
+                } else if (text && (text.includes('videoPlayMetadata') || text.includes('progressiveStreams') || text.includes('adaptiveStreams'))) {
+                  try {
+                    const json = JSON.parse(text);
+                    const metas = scanJsonForVideoMetadata(json);
+                    for (const m of metas) {
+                      window.dispatchEvent(new CustomEvent('__GARRETT_METADATA_DISCOVERED__', {
+                        detail: { ...m, timestamp: Date.now() }
+                      }));
+                    }
+                  } catch (e) {}
                 }
               }
             } catch (e) {}
@@ -196,45 +333,6 @@
       } catch (err) {}
       return originalAppendBuffer.apply(this, arguments);
     };
-  }
-
-  function getBestProgressiveUrl(progressiveStreams) {
-    if (!Array.isArray(progressiveStreams) || progressiveStreams.length === 0) return null;
-    const sorted = progressiveStreams.slice().sort((a, b) => {
-      const resA = (a.width || 0) * (a.height || 0);
-      const resB = (b.width || 0) * (b.height || 0);
-      if (resA !== resB) return resB - resA;
-      return (b.bitRate || 0) - (a.bitRate || 0);
-    });
-    const best = sorted[0];
-    const loc = best?.streamingLocations?.[0]?.url ||
-                (typeof best?.streamingLocations?.[0] === 'string' ? best.streamingLocations[0] : null) ||
-                best?.url;
-    return loc ? { url: loc, width: best.width, height: best.height, bitRate: best.bitRate } : null;
-  }
-
-  function parseVideoMetadata(metaObj) {
-    if (!metaObj || typeof metaObj !== 'object') return null;
-    const vpm = metaObj.videoPlayMetadata || metaObj;
-    const bestProg = getBestProgressiveUrl(vpm.progressiveStreams);
-    const dashUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'DASH' || s.url?.includes('dash') || s.url?.includes('.mpd'))?.url;
-    const hlsUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'HLS' || s.url?.includes('m3u8'))?.url;
-    const manifestUrl = dashUrl || hlsUrl || (typeof vpm.manifestUrl === 'string' ? vpm.manifestUrl : null);
-    const progUrl = bestProg ? bestProg.url : (typeof vpm.progressiveUrl === 'string' ? vpm.progressiveUrl : null);
-    const dur = vpm.duration ? (vpm.duration > 1000 ? vpm.duration / 1000 : vpm.duration) : null;
-    const entityUrn = vpm.entityUrn || vpm.mediaUrn || metaObj.entityUrn || null;
-
-    if (progUrl || manifestUrl) {
-      return {
-        progressiveUrl: progUrl,
-        manifestUrl: manifestUrl,
-        dashUrl: dashUrl || null,
-        hlsUrl: hlsUrl || null,
-        entityUrn: entityUrn,
-        duration: dur
-      };
-    }
-    return null;
   }
 
   function inspectObjectForVideo(obj, depth = 0, visited = new WeakSet()) {

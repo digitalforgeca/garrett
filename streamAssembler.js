@@ -152,9 +152,11 @@
     // 1. Extract total duration from MPD or Period, or options.duration fallback
     const mpdDurMatch = xmlText.match(/\bmediaPresentationDuration=["']([^"']+)["']/i);
     const periodDurMatch = xmlText.match(/<Period\b[^>]*\bduration=["']([^"']+)["']/i);
-    const mpdDur = (mpdDurMatch ? parseIsoDuration(mpdDurMatch[1]) : 0) ||
-                   (periodDurMatch ? parseIsoDuration(periodDurMatch[1]) : 0);
-    const optDur = (options && typeof options.duration === 'number' && options.duration > 0 && isFinite(options.duration)) ? options.duration : 0;
+    const rawMpdDur = (mpdDurMatch ? parseIsoDuration(mpdDurMatch[1]) : 0) ||
+                      (periodDurMatch ? parseIsoDuration(periodDurMatch[1]) : 0);
+    // Disregard duration if <= 5.0 (MSE initial buffer trap)
+    const mpdDur = rawMpdDur > 5.0 ? rawMpdDur : 0;
+    const optDur = (options && typeof options.duration === 'number' && options.duration > 5.0 && isFinite(options.duration)) ? options.duration : 0;
     const totalDurationSeconds = Math.max(mpdDur, optDur);
 
     // 2. Parse each AdaptationSet block
@@ -271,10 +273,21 @@
             }
 
             // Extrapolate to full presentation duration if manifest timeline only provided initial chunks
-            if (totalDurationSeconds > 0 && timescaleVal > 0) {
+            if (totalDurationSeconds > 5 && timescaleVal > 0) {
               const maxTime = totalDurationSeconds * timescaleVal;
               const stepD = lastD > 0 ? lastD : (2 * timescaleVal);
               while (currentTime < maxTime) {
+                const segRaw = expandTemplate(mediaTpl, id, bandwidth, currentNum, currentTime);
+                segments.push(resolveUrl(segRaw, baseUrl));
+                currentNum++;
+                currentTime += stepD;
+              }
+            } else if (segments.length <= 4 && timescaleVal > 0) {
+              // Presentation duration unknown or was <= 5s: synthesize at least 50 segments
+              // assembleSegments will crawl until the first trailing 404
+              const stepD = lastD > 0 ? lastD : (2 * timescaleVal);
+              const targetCount = Math.max(50, segments.length + 45);
+              while (segments.length < targetCount) {
                 const segRaw = expandTemplate(mediaTpl, id, bandwidth, currentNum, currentTime);
                 segments.push(resolveUrl(segRaw, baseUrl));
                 currentNum++;
@@ -388,7 +401,7 @@
       const allUrls = [];
       if (best.initUrl) allUrls.push(best.initUrl);
       allUrls.push(...best.segments);
-      const result = await assembleSegments(allUrls, 'video/mp4', 'mp4', onProgress, fetchBuffer);
+      const result = await assembleSegments(allUrls, 'video/mp4', 'mp4', onProgress, fetchBuffer, { allowTrailingLoss: true });
       return { ...result, representation: best };
     }
 
@@ -411,10 +424,12 @@
       }
       allUrls.push(...parsed.segments);
 
-      const isMp4 = parsed.initUri || allUrls[0].includes('.m4s') || allUrls[0].includes('.mp4');
-      const mimeType = isMp4 ? 'video/mp4' : 'video/mp2t';
-      const ext = isMp4 ? 'mp4' : 'ts';
-      return assembleSegments(allUrls, mimeType, ext, onProgress, fetchBuffer);
+      const isFmp4 = parsed.initUri || allUrls.some(u => u.includes('.m4s') || u.includes('.mp4'));
+      const mime = isFmp4 ? 'video/mp4' : 'video/mp2t';
+      const ext = isFmp4 ? 'mp4' : 'ts';
+
+      const result = await assembleSegments(allUrls, mime, ext, onProgress, fetchBuffer, { allowTrailingLoss: true });
+      return { ...result, playlist: parsed };
     }
 
     throw new Error('Unrecognized stream manifest format (not DASH or HLS).');
@@ -448,10 +463,11 @@
       const prefix = mLi[1];
       const seq = parseInt(mLi[2], 10);
       const ts = parseInt(mLi[3], 10);
-      const deltaTs = seq > 0 ? Math.round(ts / seq) : 2000;
+      const isEpoch = ts > 10000000;
+      const deltaTs = isEpoch ? 2000 : (seq > 0 ? Math.round(ts / seq) : 2000);
       return {
         type: 'seq_timestamp',
-        generateUrl: (n) => `${prefix}${n}/${n * deltaTs}${qStr}`,
+        generateUrl: (n) => isEpoch ? `${prefix}${n}/${ts}${qStr}` : `${prefix}${n}/${n * deltaTs}${qStr}`,
         initUrl: `${prefix}init${qStr}`,
         currentIndex: seq,
         startIndex: 0,
@@ -502,13 +518,13 @@
     if (!pattern) return null;
 
     const segDuration = options.segmentDuration || (pattern.deltaTs ? pattern.deltaTs / 1000 : 2.0);
-    const safeDuration = (typeof targetDurationSeconds === 'number' && isFinite(targetDurationSeconds) && targetDurationSeconds > 0)
+    const safeDuration = (typeof targetDurationSeconds === 'number' && isFinite(targetDurationSeconds) && targetDurationSeconds > 5)
       ? Math.min(targetDurationSeconds, 7200)
       : 0;
 
-    const expectedCount = safeDuration > 0
+    const expectedCount = safeDuration > 5
       ? Math.min(Math.max(Math.ceil(safeDuration / segDuration) + 1, 6), 600)
-      : Math.min(Math.max(pattern.currentIndex + 8, 15), 100);
+      : Math.min(Math.max(pattern.currentIndex + 35, 45), 120);
 
     const urls = [];
     if (pattern.initUrl && options.includeInit !== false) {
@@ -537,42 +553,46 @@
     const concurrency = Math.min(6, total);
     let currentIndex = 0;
     const allowTrailingLoss = options.allowTrailingLoss !== false;
+    let eofReached = false;
 
     async function worker() {
-      while (currentIndex < total) {
+      while (currentIndex < total && !eofReached) {
         const idx = currentIndex++;
+        if (idx >= total || eofReached) break;
         const url = allUrls[idx];
         let attempts = 0;
         let success = false;
 
-        while (attempts < 3 && !success) {
+        while (attempts < 3 && !success && !eofReached) {
           try {
             attempts++;
             buffers[idx] = await fetchBuffer(url);
             success = true;
           } catch (err) {
             const is404 = err && err.message && (err.message.includes('404') || err.message.includes('410'));
-            // If trailing segment (past index 2) returns 404, stream reached EOF
-            if (is404 && allowTrailingLoss && idx > 2) {
+            // If trailing segment (past index 1) returns 404, stream reached EOF
+            if (is404 && allowTrailingLoss && idx > 1) {
               buffers[idx] = null;
+              eofReached = true;
               break;
             }
             if (attempts >= 3) {
-              if (allowTrailingLoss && idx > 2) {
+              if (allowTrailingLoss && idx > 1) {
                 console.warn(`Trailing segment ${idx + 1}/${total} not available (${err.message}), stopping stream.`);
                 buffers[idx] = null;
+                eofReached = true;
                 break;
               }
               console.error(`Failed segment ${idx + 1}/${total} (${url}):`, err);
               throw new Error(`Failed segment ${idx + 1}/${total}: ${err.message}`);
             }
-            await new Promise(r => setTimeout(r, 350 * attempts));
+            await new Promise(r => setTimeout(r, 300 * attempts));
           }
         }
 
         completed++;
         if (onProgress) {
-          const pct = Math.round((completed / total) * 100);
+          const pct = Math.min(99, Math.round((completed / total) * 100));
           onProgress(completed, total, pct);
         }
       }
