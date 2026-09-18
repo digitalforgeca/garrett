@@ -1,0 +1,56 @@
+{
+  "manifest_version": 3,
+  "name": "Garrett — Stream Keeper",
+  "version": "1.6.4",
+  "description": "Inspired by the Master Thief. Extracts, preserves, and keeps ephemeral video blobs and streams from fading into the shadows.",
+  "permissions": [
+    "downloads",
+    "activeTab",
+    "scripting",
+    "webRequest",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "all_frames": true,
+      "match_about_blank": true,
+      "js": ["pageHook.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "all_frames": true,
+      "match_about_blank": true,
+      "css": ["content.css"],
+      "js": ["keeper.js", "streamAssembler.js", "garrettQueue.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["pageHook.js", "streamAssembler.js", "garrettQueue.js", "keeper.js", "hlsDownloader.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

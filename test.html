@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Video Blob Test Lab</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      padding: 40px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    h1 {
+      margin-bottom: 8px;
+    }
+    p {
+      color: #94a3b8;
+      margin-bottom: 30px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 30px;
+      max-width: 900px;
+      width: 100%;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    video {
+      width: 100%;
+      height: 240px;
+      background: #000;
+      border-radius: 8px;
+    }
+    .badge {
+      display: inline-block;
+      align-self: flex-start;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: bold;
+    }
+    .badge-media {
+      background: #a855f7;
+      color: #fff;
+    }
+    .badge-blob {
+      background: #10b981;
+      color: #fff;
+    }
+    .code {
+      font-family: monospace;
+      font-size: 11px;
+      color: #cbd5e1;
+      word-break: break-all;
+      background: #0f172a;
+      padding: 6px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Video Blob Test Lab</h1>
+  <p>Test your Video Blob Saver extension against both MediaSource and Direct File Blobs.</p>
+
+  <div class="grid">
+    <!-- Test Card 1: Canvas to Recorded Blob -->
+    <div class="card">
+      <span class="badge badge-blob">Direct File Blob (Static)</span>
+      <h3>Generated File Blob Video</h3>
+      <video id="v-blob" controls loop></video>
+      <div class="code" id="blob-url">Generating blob...</div>
+    </div>
+
+    <!-- Test Card 2: MediaSource Stream -->
+    <div class="card">
+      <span class="badge badge-media">MediaSource Blob (Streaming)</span>
+      <h3>MediaSource Stream Video</h3>
+      <video id="v-mse" controls loop></video>
+      <div class="code" id="mse-url">Generating MediaSource...</div>
+    </div>
+  </div>
+
+  <script>
+    // Create animated canvas video
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 360;
+    const ctx = canvas.getContext('2d');
+    let frame = 0;
+
+    // Generate synthesized audio tone
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const dst = audioCtx.createMediaStreamDestination();
+    osc.connect(dst);
+    osc.start();
+
+    function draw() {
+      ctx.fillStyle = '#1e1e2e';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.fillStyle = '#6366f1';
+      ctx.beginPath();
+      const x = 320 + Math.sin(frame * 0.05) * 200;
+      const y = 180 + Math.cos(frame * 0.05) * 80;
+      ctx.arc(x, y, 40, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 24px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`Frame: ${frame++}`, 320, 190);
+      ctx.font = '16px sans-serif';
+      ctx.fillText('Video Blob Test Generator', 320, 220);
+
+      requestAnimationFrame(draw);
+    }
+    draw();
+
+    // 1. Generate Direct Blob
+    const cStream = canvas.captureStream(30);
+    cStream.addTrack(dst.stream.getAudioTracks()[0]);
+    const rec = new MediaRecorder(cStream);
+    const chunks = [];
+    rec.ondataavailable = e => chunks.push(e.data);
+    rec.onstop = () => {
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      const v = document.getElementById('v-blob');
+      v.src = url;
+      v.play().catch(() => {});
+      document.getElementById('blob-url').textContent = url;
+    };
+    rec.start();
+    setTimeout(() => rec.stop(), 3000);
+
+    // 2. Generate MediaSource Blob
+    if (window.MediaSource) {
+      const ms = new MediaSource();
+      const msUrl = URL.createObjectURL(ms);
+      const vMse = document.getElementById('v-mse');
+      vMse.src = msUrl;
+      document.getElementById('mse-url').textContent = msUrl;
+
+      ms.addEventListener('sourceopen', () => {
+        // Fetch a small public segment or attach sourcebuffer
+        try {
+          const mime = 'video/webm; codecs="vp8, vorbis"';
+          if (MediaSource.isTypeSupported(mime)) {
+            const sb = ms.addSourceBuffer(mime);
+            // Append small chunk on demand if available
+          }
+        } catch (e) {
+          console.warn('MS buffer error:', e);
+        }
+      });
+    }
+  </script>
+</body>
+</html>

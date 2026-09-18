@@ -1,0 +1,23 @@
+# Operating System
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Temporary & Downloaded Media Files
+*.mp4
+*.m4s
+*.ts
+*.webm
+*.part
+*.crdownload
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# IDE & Editor Configs
+.vscode/
+.idea/
