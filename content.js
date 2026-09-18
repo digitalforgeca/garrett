@@ -22,6 +22,9 @@
   const mediaSourceToBlob = new Map();
   const blobToMediaSource = new Map();
 
+  // In-page registry of already kept videos
+  const keptVideosRegistry = new Set();
+
   function isNonMediaUrl(url) {
     if (!url || typeof url !== 'string') return true;
     const clean = url.split('?')[0].toLowerCase();
@@ -747,7 +750,7 @@
     try {
       const allMeta = [...discoveredMetadataCache, ...extractAllEmbeddedVideoMetadata()];
       for (const m of allMeta) {
-        if (matchesVideoMetadata(state, m) || (allMeta.length === 1 && !state.progressiveUrl)) {
+        if (matchesVideoMetadata(state, m)) {
           if (m.progressiveUrl) state.progressiveUrl = m.progressiveUrl;
           if (m.manifestUrl) state.manifestUrl = m.manifestUrl;
           if (m.mediaKey) state.mediaKey = m.mediaKey;
@@ -867,6 +870,45 @@
     parent.appendChild(btn);
     state.overlayBtn = btn;
     state.mainBtn = btn;
+
+    const isAlreadyKept = state.isKept ||
+      (state.video && state.video.__garrett_kept) ||
+      (state.id && keptVideosRegistry.has(state.id)) ||
+      (state.entityKey && keptVideosRegistry.has(state.entityKey)) ||
+      (state.mediaKey && keptVideosRegistry.has(state.mediaKey));
+    if (isAlreadyKept) {
+      updateButtonKeptState(state);
+    }
+  }
+
+  function updateButtonKeptState(state) {
+    if (!state || !state.mainBtn) return;
+    const btn = state.mainBtn;
+    btn.classList.add('vbs-btn-kept');
+    btn.title = state.keptFilename
+      ? `Already kept: ${state.keptFilename}. Click to keep again.`
+      : 'Already kept. Click to keep again.';
+    btn.innerHTML = `
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="20 6 9 17 4 12"></polyline>
+      </svg>
+      <span class="vbs-btn-text">Kept</span>
+    `;
+  }
+
+  function markVideoAsKept(state, filename) {
+    if (!state) return;
+    state.isKept = true;
+    state.keptFilename = filename;
+    if (state.id) keptVideosRegistry.add(state.id);
+    if (state.entityKey) keptVideosRegistry.add(state.entityKey);
+    if (state.mediaKey) keptVideosRegistry.add(state.mediaKey);
+    if (state.progressiveUrl) keptVideosRegistry.add(state.progressiveUrl);
+    const src = state.video ? (state.video.currentSrc || state.video.src || '') : '';
+    if (src) keptVideosRegistry.add(src);
+    if (state.video) state.video.__garrett_kept = true;
+
+    updateButtonKeptState(state);
   }
 
   async function resolveStreamForVideo(state, maxWaitMs = 2500) {
@@ -926,8 +968,7 @@
       const allMeta = [...discoveredMetadataCache, ...extractAllEmbeddedVideoMetadata()];
       for (const m of allMeta) {
         const keyMatch = matchesVideoMetadata(state, m);
-        const singleMatch = allMeta.length === 1 || videoRegistry.size <= 1;
-        if (keyMatch || singleMatch) {
+        if (keyMatch) {
           if (m.mediaKey) state.mediaKey = m.mediaKey;
           if (m.mediaKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
             state.entityKey = m.mediaKey;
@@ -1001,13 +1042,16 @@
               if (entityKeysMatch(k, name)) { matchesKey = true; break; }
             }
           }
-          if (!matchesKey && isPlaying && (resEntries.length - 1 - i < 15)) {
+          if (!matchesKey && isPlaying && videoRegistry.size === 1 && (resEntries.length - 1 - i < 15)) {
             if (name.includes('/playlist/vid/') || name.includes('/dash/')) {
               matchesKey = true;
             }
           }
 
           if (matchesKey) {
+            // Guard: ensure this URL is not already claimed by another video in videoRegistry!
+            const isClaimedByOther = Array.from(videoRegistry.values()).some(other => other !== state && (other.progressiveUrl === name || other.manifestUrl === name));
+            if (isClaimedByOther) continue;
             const streamKey = extractStreamKey(name);
             if (streamKey && !state.mediaKey) state.mediaKey = streamKey;
             if (streamKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
@@ -1218,15 +1262,9 @@
 
       if (saved) {
         showToast(`"What was taken is now safely kept." — Garrett (${filename})`, 6000);
+        markVideoAsKept(state, filename);
       }
       safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
-
-      if (textEl) {
-        textEl.textContent = 'Kept!';
-        setTimeout(() => {
-          if (textEl) textEl.textContent = 'Keep Video';
-        }, 4000);
-      }
     } catch (err) {
       console.error('[Garrett] Stream download error:', err);
       throw err;
@@ -1342,9 +1380,8 @@
             const saved = downloadBlobDirectly(blob, filename);
             if (saved) {
               showToast(`"What was taken is now safely kept." — Garrett (${filename})`, 6000);
+              markVideoAsKept(state, filename);
               safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
-              if (textEl) textEl.textContent = 'Kept!';
-              setTimeout(() => { if (textEl) textEl.textContent = 'Keep Video'; }, 4000);
               return;
             }
           }
@@ -1413,15 +1450,9 @@
 
       if (saved) {
         showToast(`"What was taken is now safely kept." — Garrett (${filename})`, 6000);
+        markVideoAsKept(state, filename);
       }
       safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
-
-      if (textEl) {
-        textEl.textContent = 'Kept!';
-        setTimeout(() => {
-          if (textEl) textEl.textContent = 'Keep Video';
-        }, 4000);
-      }
     } catch (err) {
       console.error('[Garrett] Segment queue download error:', err);
       showToast(`Segment assembly error: ${err.message}`, 5000);
@@ -1436,6 +1467,9 @@
     if (state.isDownloading) {
       showToast('Garrett is already preserving this stream...');
       return;
+    }
+    if (state.isKept) {
+      showToast(`This video was already kept (${state.keptFilename || 'earlier'}). Saving a fresh copy...`, 3500);
     }
     state.isDownloading = true;
 
@@ -1474,10 +1508,8 @@
         }, async (resp) => {
           if (resp && resp.success) {
             showToast(`"What was taken is now safely kept." — Garrett (${filename})`, 6000);
+            markVideoAsKept(state, filename);
             safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
-            if (textEl) {
-              textEl.textContent = 'Kept!';
-            }
           } else {
             // Background download fallback via fetch in page
             try {
@@ -1485,19 +1517,14 @@
               const blob = await r.blob();
               downloadBlobDirectly(blob, filename);
               showToast(`"What was taken is now safely kept." — Garrett (${filename})`, 6000);
+              markVideoAsKept(state, filename);
               safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
-              if (textEl) {
-                textEl.textContent = 'Kept!';
-              }
             } catch (err) {
               showToast(`Download error: ${err.message}`);
               safeSendMessage({ action: 'streamError', videoId: state.id, error: err.message });
-              if (textEl) textEl.textContent = 'Keep Video';
+              if (textEl && !state.isKept) textEl.textContent = 'Keep Video';
             }
           }
-          setTimeout(() => {
-            if (textEl) textEl.textContent = 'Keep Video';
-          }, 4000);
         });
         return;
       }
@@ -1521,13 +1548,8 @@
         const filename = generateFilename(state.video, ext);
         safeSendMessage({ action: 'downloadUrl', url: src, filename, saveAs: false });
         showToast(`Downloading ${filename}...`);
+        markVideoAsKept(state, filename);
         safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
-        if (textEl) {
-          textEl.textContent = 'Kept!';
-        }
-        setTimeout(() => {
-          if (textEl) textEl.textContent = 'Keep Video';
-        }, 3000);
         return;
       }
 
@@ -1549,17 +1571,15 @@
           const name = resEntries[i].name;
           if (isNonMediaUrl(name)) continue;
           if (name.includes('/playlist/vid/')) {
+            const isClaimedByOther = Array.from(videoRegistry.values()).some(other => other !== state && (other.progressiveUrl === name || other.manifestUrl === name));
+            if (isClaimedByOther) continue;
+
             if (isGenuineProgressiveMp4Url(name)) {
               const filename = generateFilename(state.video, 'mp4');
               safeSendMessage({ action: 'downloadUrl', url: name, filename, saveAs: false });
               showToast(`Downloading full video: ${filename}...`);
+              markVideoAsKept(state, filename);
               safeSendMessage({ action: 'streamCompleted', videoId: state.id, filename });
-              if (textEl) {
-                textEl.textContent = 'Kept!';
-              }
-              setTimeout(() => {
-                if (textEl) textEl.textContent = 'Keep Video';
-              }, 4000);
               return;
             }
             if (name.includes('.m4s') || name.includes('.ts') || name.includes('/segment/') || /\/[0-9]+\/[0-9]+(?:\?|$)/.test(name)) {

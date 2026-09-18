@@ -494,49 +494,44 @@
         }
       }
 
-      // Tier 3: If record exists but is missing manifest, check if unattached stream exists for this tab or active stream
-      if (this.unattachedStreams.size > 0) {
-        const sortedUnattached = Array.from(this.unattachedStreams.entries())
-          .sort((a, b) => (b[1].lastActive || 0) - (a[1].lastActive || 0));
-        for (const [key, u] of sortedUnattached) {
-          const tabMatch = tabId && u.tabId && u.tabId === tabId;
-          const singleStream = this.unattachedStreams.size === 1;
-          const recent = (Date.now() - (u.lastActive || 0)) < 60000;
-          if (tabMatch || singleStream || recent) {
-            if (record) {
-              if (u.manifestUrl) record.setManifest(u.manifestUrl, u.manifestXml || '');
-              if (u.progressiveUrl) record.progressiveUrl = u.progressiveUrl;
-              if (u.representations) record.representations = u.representations;
-              if (u.segments) {
-                for (const [idx, segUrl] of u.segments.entries()) record.addSegmentUrl(idx, segUrl);
-              }
-              return record;
+      // Tier 3: If record exists but is missing manifest, check unattached stream ONLY if exactly 1 stream exists on tab
+      if (this.unattachedStreams.size === 1 && this.playlistsByBlob.size <= 1) {
+        const [key, u] = Array.from(this.unattachedStreams.entries())[0];
+        const tabMatch = !tabId || !u.tabId || u.tabId === tabId;
+        if (tabMatch) {
+          if (record) {
+            if (u.manifestUrl) record.setManifest(u.manifestUrl, u.manifestXml || '');
+            if (u.progressiveUrl) record.progressiveUrl = u.progressiveUrl;
+            if (u.representations) record.representations = u.representations;
+            if (u.segments) {
+              for (const [idx, segUrl] of u.segments.entries()) record.addSegmentUrl(idx, segUrl);
             }
-            return {
-              manifestUrl: u.manifestUrl,
-              manifestXml: u.manifestXml,
-              progressiveUrl: u.progressiveUrl,
-              isStream: true,
-              format: u.format,
-              streamKey: key,
-              allSegments: Array.from(u.segments.values()),
-              toJSON: () => ({
-                blobUrl: src,
-                manifestUrl: u.manifestUrl,
-                progressiveUrl: u.progressiveUrl,
-                format: u.format,
-                isStream: true,
-                playlistUrls: Array.from(u.segments.values())
-              })
-            };
+            return record;
           }
+          return {
+            manifestUrl: u.manifestUrl,
+            manifestXml: u.manifestXml,
+            progressiveUrl: u.progressiveUrl,
+            isStream: true,
+            format: u.format,
+            streamKey: key,
+            allSegments: Array.from(u.segments.values()),
+            toJSON: () => ({
+              blobUrl: src,
+              manifestUrl: u.manifestUrl,
+              progressiveUrl: u.progressiveUrl,
+              format: u.format,
+              isStream: true,
+              playlistUrls: Array.from(u.segments.values())
+            })
+          };
         }
       }
 
-      // Tier 4: Duration-compatible stream (only if exact match within 2 seconds)
-      if (duration > 5) {
+      // Tier 4: Duration-compatible stream (only if exact match within 1.5 seconds AND matching entity key)
+      if (duration > 5 && entityKey) {
         for (const r of this.playlistsByBlob.values()) {
-          if (r.duration > 0 && Math.abs(r.duration - duration) <= 2 && (r.manifestUrl || r.progressiveUrl)) {
+          if (r.duration > 0 && Math.abs(r.duration - duration) <= 1.5 && (r.entityKey && entityKeysMatch(r.entityKey, entityKey)) && (r.manifestUrl || r.progressiveUrl)) {
             return r;
           }
         }

@@ -132,6 +132,22 @@
   white-space: nowrap !important;
 }
 
+.vbs-overlay-btn.vbs-btn-kept {
+  background: #022c22 !important;
+  background-color: #022c22 !important;
+  border-color: #10b981 !important;
+  color: #6ee7b7 !important;
+  opacity: 0.95 !important;
+}
+
+.vbs-overlay-btn.vbs-btn-kept:hover {
+  background: #064e3b !important;
+  background-color: #064e3b !important;
+  border-color: #34d399 !important;
+  color: #ffffff !important;
+  opacity: 1 !important;
+}
+
 /* Persistent Recording Banner on Top of Video */
 .vbs-recording-banner {
   position: absolute;
