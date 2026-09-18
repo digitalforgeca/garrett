@@ -71,6 +71,25 @@
     );
   }
 
+  function extractMediaUrlFromItem(item) {
+    if (!item) return null;
+    if (typeof item === 'string') return item;
+    if (typeof item.url === 'string') return item.url;
+    if (Array.isArray(item.streamingLocations)) {
+      for (const loc of item.streamingLocations) {
+        if (!loc) continue;
+        if (typeof loc === 'string') return loc;
+        if (typeof loc.url === 'string') return loc.url;
+      }
+    }
+    const singleLoc = item.streamingLocation || item.location;
+    if (singleLoc) {
+      if (typeof singleLoc === 'string') return singleLoc;
+      if (typeof singleLoc.url === 'string') return singleLoc.url;
+    }
+    return null;
+  }
+
   function isInitBox(arrayBuffer) {
     if (!arrayBuffer || arrayBuffer.byteLength < 8) return false;
     const view = new DataView(arrayBuffer);
@@ -769,32 +788,29 @@
             });
             for (const item of sorted) {
               if (!item) continue;
-              if (Array.isArray(item.streamingLocations)) {
-                for (const loc of item.streamingLocations) {
-                  const u = (loc && typeof loc === 'object') ? loc.url : (typeof loc === 'string' ? loc : null);
-                  if (u && typeof u === 'string' && isGenuineProgressiveMp4Url(u)) {
-                    bestProgUrl = u;
-                    break;
-                  }
-                }
-              }
-              if (bestProgUrl) break;
-              const singleLoc = item.streamingLocation || item.location;
-              if (singleLoc) {
-                const u = (typeof singleLoc === 'object') ? singleLoc.url : (typeof singleLoc === 'string' ? singleLoc : null);
-                if (u && typeof u === 'string' && isGenuineProgressiveMp4Url(u)) {
-                  bestProgUrl = u;
-                  break;
-                }
-              }
-              if (item.url && typeof item.url === 'string' && isGenuineProgressiveMp4Url(item.url)) {
-                bestProgUrl = item.url;
+              const u = extractMediaUrlFromItem(item);
+              if (u && typeof u === 'string' && isGenuineProgressiveMp4Url(u)) {
+                bestProgUrl = u;
                 break;
               }
             }
           }
-          const dashUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'DASH' || s.url?.includes('dash') || s.url?.includes('.mpd'))?.url || null;
-          const hlsUrl = vpm.adaptiveStreams?.find(s => s.protocol === 'HLS' || s.url?.includes('m3u8'))?.url || null;
+
+          let dashUrl = null;
+          let hlsUrl = null;
+          const adaptiveList = Array.isArray(vpm.adaptiveStreams) ? vpm.adaptiveStreams : [];
+          for (const s of adaptiveList) {
+            if (!s) continue;
+            const u = extractMediaUrlFromItem(s);
+            if (!u) continue;
+            const proto = String(s.protocol || '').toUpperCase();
+            if (proto === 'DASH' || u.includes('/dash/') || u.includes('.mpd')) {
+              if (!dashUrl) dashUrl = u;
+            } else if (proto === 'HLS' || u.includes('.m3u8') || u.includes('/hls/')) {
+              if (!hlsUrl) hlsUrl = u;
+            }
+          }
+
           const dur = vpm.duration ? (vpm.duration > 1000 ? vpm.duration / 1000 : vpm.duration) : 0;
 
           if (bestProgUrl || dashUrl || hlsUrl) {
@@ -1396,42 +1412,6 @@
     return result;
   }
 
-  async function sweepMseBuffer(state, onProgress) {
-    const v = state.video;
-    if (!v) return;
-    const dur = resolveRealVideoDuration(state);
-    const sweepDur = dur > 5 ? dur : 60;
-
-    const origTime = v.currentTime;
-    const origMuted = v.muted;
-    const origPaused = v.paused;
-
-    try {
-      v.muted = true;
-      const step = 8; // 8-second forward leaps to trigger the player's MSE buffer engine
-      const steps = [];
-      for (let t = 0; t <= sweepDur; t += step) steps.push(t);
-      if (steps[steps.length - 1] < sweepDur - 2) steps.push(Math.max(0, sweepDur - 1));
-
-      for (let i = 0; i < steps.length; i++) {
-        v.currentTime = steps[i];
-        if (onProgress) {
-          const pct = Math.round(((i + 1) / steps.length) * 50);
-          onProgress(pct);
-        }
-        await new Promise(r => setTimeout(r, 260));
-      }
-    } catch (e) {
-      console.warn('[Garrett] MSE buffer sweep warning:', e.message);
-    } finally {
-      v.currentTime = origTime;
-      v.muted = origMuted;
-      if (!origPaused) {
-        v.play().catch(() => {});
-      }
-    }
-  }
-
   async function downloadFromSegmentQueue(state, segmentUrls) {
     state.isDownloading = true;
 
@@ -1460,16 +1440,6 @@
       let rawChunks = state.capturedChunks ? deduplicateChunks(state.capturedChunks) : [];
 
       let urlsToDownload = (segmentUrls && segmentUrls.length > 0) ? segmentUrls.slice() : [];
-
-      // If chunks cover less than expected or we only have a tiny snippet (<= 3 segments), run an automated sweep
-      if (state.video && (rawChunks.length < expectedMinChunks || (urlsToDownload.length <= 3 && rawChunks.length < 3))) {
-        console.log(`[Garrett] MSE buffer has ${rawChunks.length} chunks (< ${expectedMinChunks} needed). Sweeping timeline...`);
-        if (textEl) textEl.textContent = 'Buffering...';
-        await sweepMseBuffer(state, (pct) => {
-          if (textEl) textEl.textContent = `${pct}%`;
-        });
-        rawChunks = state.capturedChunks ? deduplicateChunks(state.capturedChunks) : [];
-      }
 
       // Priority Path: Authentic MSE captured chunks from the player's active SourceBuffer
       if (rawChunks.length >= 3 && (rawChunks.length >= expectedMinChunks || urlsToDownload.length <= 3)) {
@@ -1515,8 +1485,12 @@
           state.isDownloading = false;
           return await keepVideoNow(state);
         }
+        if (state.manifestUrl) {
+          state.isDownloading = false;
+          return await downloadStreamInPage(state, state.manifestUrl, state.manifestXml);
+        }
 
-        showToast('Stream is buffering. Please play 2-3 more seconds of the video so Garrett can lock onto the complete presentation, then click Keep Video.', 5500);
+        showToast('Stream is buffering. Please play 1-2 seconds of the video so Garrett can lock onto the complete presentation, then click Keep Video.', 5500);
         if (textEl) textEl.textContent = 'Keep Video';
         state.isDownloading = false;
         return;

@@ -411,9 +411,8 @@
           .sort((a, b) => (b[1].lastActive || 0) - (a[1].lastActive || 0));
         for (const [key, u] of sortedUnattached) {
           const keyMatches = record.entityKey && entityKeysMatch(record.entityKey, key);
-          const singleStream = this.unattachedStreams.size === 1;
-          const recent = (Date.now() - (u.lastActive || 0)) < 60000;
-          if (keyMatches || singleStream || recent) {
+          const singleStream = this.unattachedStreams.size === 1 && this.playlistsByBlob.size <= 1;
+          if (keyMatches || (singleStream && !record.entityKey)) {
             if (u.manifestUrl) record.setManifest(u.manifestUrl, u.manifestXml || '');
             if (u.progressiveUrl) record.progressiveUrl = u.progressiveUrl;
             if (u.representations) record.representations = u.representations;

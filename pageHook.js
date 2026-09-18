@@ -94,6 +94,25 @@
     );
   }
 
+  function extractMediaUrlFromItem(item) {
+    if (!item) return null;
+    if (typeof item === 'string') return item;
+    if (typeof item.url === 'string') return item.url;
+    if (Array.isArray(item.streamingLocations)) {
+      for (const loc of item.streamingLocations) {
+        if (!loc) continue;
+        if (typeof loc === 'string') return loc;
+        if (typeof loc.url === 'string') return loc.url;
+      }
+    }
+    const singleLoc = item.streamingLocation || item.location;
+    if (singleLoc) {
+      if (typeof singleLoc === 'string') return singleLoc;
+      if (typeof singleLoc.url === 'string') return singleLoc.url;
+    }
+    return null;
+  }
+
   function getBestProgressiveUrl(progressiveStreams) {
     if (!Array.isArray(progressiveStreams) || progressiveStreams.length === 0) return null;
     const sorted = progressiveStreams.slice().sort((a, b) => {
@@ -104,23 +123,9 @@
     });
     for (const item of sorted) {
       if (!item) continue;
-      if (Array.isArray(item.streamingLocations)) {
-        for (const loc of item.streamingLocations) {
-          const u = (loc && typeof loc === 'object') ? loc.url : (typeof loc === 'string' ? loc : null);
-          if (u && typeof u === 'string' && isGenuineProgressiveMp4Url(u)) {
-            return { url: u, width: item.width, height: item.height, bitRate: item.bitRate };
-          }
-        }
-      }
-      const singleLoc = item.streamingLocation || item.location;
-      if (singleLoc) {
-        const u = (typeof singleLoc === 'object') ? singleLoc.url : (typeof singleLoc === 'string' ? singleLoc : null);
-        if (u && typeof u === 'string' && isGenuineProgressiveMp4Url(u)) {
-          return { url: u, width: item.width, height: item.height, bitRate: item.bitRate };
-        }
-      }
-      if (item.url && typeof item.url === 'string' && isGenuineProgressiveMp4Url(item.url)) {
-        return { url: item.url, width: item.width, height: item.height, bitRate: item.bitRate };
+      const u = extractMediaUrlFromItem(item);
+      if (u && typeof u === 'string' && isGenuineProgressiveMp4Url(u)) {
+        return { url: u, width: item.width, height: item.height, bitRate: item.bitRate };
       }
     }
     return null;
@@ -131,8 +136,23 @@
     const vpm = metaObj.videoPlayMetadata || metaObj.videoPlayMetadataV2 || metaObj;
     const bestProg = getBestProgressiveUrl(vpm.progressiveStreams || metaObj.progressiveStreams);
     const adaptive = vpm.adaptiveStreams || metaObj.adaptiveStreams;
-    const dashUrl = adaptive?.find(s => s.protocol === 'DASH' || s.url?.includes('dash') || s.url?.includes('.mpd'))?.url;
-    const hlsUrl = adaptive?.find(s => s.protocol === 'HLS' || s.url?.includes('m3u8'))?.url;
+
+    let dashUrl = null;
+    let hlsUrl = null;
+    if (Array.isArray(adaptive)) {
+      for (const s of adaptive) {
+        if (!s) continue;
+        const u = extractMediaUrlFromItem(s);
+        if (!u) continue;
+        const proto = String(s.protocol || '').toUpperCase();
+        if (proto === 'DASH' || u.includes('/dash/') || u.includes('.mpd')) {
+          if (!dashUrl) dashUrl = u;
+        } else if (proto === 'HLS' || u.includes('.m3u8') || u.includes('/hls/')) {
+          if (!hlsUrl) hlsUrl = u;
+        }
+      }
+    }
+
     const manifestUrl = dashUrl || hlsUrl || (typeof vpm.manifestUrl === 'string' ? vpm.manifestUrl : null);
     const progUrl = bestProg ? bestProg.url : (typeof vpm.progressiveUrl === 'string' && isGenuineProgressiveMp4Url(vpm.progressiveUrl) ? vpm.progressiveUrl : null);
     const rawDur = vpm.duration || vpm.durationMs || vpm.durationInSeconds || metaObj.duration || metaObj.durationMs || 0;
