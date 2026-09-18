@@ -705,7 +705,7 @@
     const currentSrc = video ? (video.currentSrc || video.src || '') : '';
     const entityKey = state.entityKey || (video ? extractVideoEntityKeyFromDom(video) : '');
     state.entityKey = entityKey;
-    const duration = video ? (video.duration || 0) : 0;
+    const duration = resolveRealVideoDuration(state);
 
     // Fast Path 0: Already cached progressive MP4 URL
     if (state.progressiveUrl) {
@@ -767,7 +767,6 @@
       }
     } catch (e) {}
 
-    const duration = resolveRealVideoDuration(state);
     const videoInfo = {
       id: state.id,
       src: currentSrc,
@@ -1337,16 +1336,17 @@
         const currentSrc = v.currentSrc || v.src || '';
         const format = state.progressiveUrl ? 'MP4' : (state.manifestUrl ? (state.manifestUrl.includes('.m3u8') ? 'HLS' : 'DASH') : (currentSrc.startsWith('blob:') ? 'DASH' : 'MP4'));
         const streamUrl = state.progressiveUrl || state.manifestUrl || currentSrc;
+        const realDur = resolveRealVideoDuration(state);
         list.push({
           id: state.id,
           src: currentSrc,
           isBlob: currentSrc.startsWith('blob:'),
           entityKey: state.entityKey,
           poster: state.poster,
-          duration: v.duration || 0,
-          width: v.videoWidth || 0,
-          height: v.videoHeight || 0,
-          muted: v.muted,
+          duration: realDur,
+          width: v ? (v.videoWidth || 0) : 0,
+          height: v ? (v.videoHeight || 0) : 0,
+          muted: v ? v.muted : false,
           format: format,
           streamUrl: streamUrl,
           hasProgressive: !!state.progressiveUrl,
