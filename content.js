@@ -418,8 +418,7 @@
     // 1. Check direct poster attribute on video
     const poster = video.getAttribute('poster') || video.poster || '';
     if (poster) {
-      const pm = poster.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i) ||
-                 poster.match(/([CD][A-Za-z0-9_-]{8,})/);
+      const pm = poster.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i);
       if (pm) {
         info.mediaKey = pm[1];
         info.allKeys.add(pm[1]);
@@ -439,15 +438,14 @@
     const thumbElements = container.querySelectorAll('[style*="videocover"], [style*="dms/image"], [style*="background"], img');
     for (const el of thumbElements) {
       const src = el.src || el.getAttribute('src') || el.getAttribute('style') || '';
-      const m = src.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i) ||
-                src.match(/([CD][A-Za-z0-9_-]{8,})/);
+      const m = src.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i);
       if (m) {
         if (!info.mediaKey) info.mediaKey = m[1];
         info.allKeys.add(m[1]);
       }
     }
 
-    // 4. Search data attributes in this container and its ancestors
+    // 4. Directly read data-entity-urn and data-urn attributes in container and ancestors
     const searchRoots = [postContainer, playerWrapper, video.parentElement].filter(Boolean);
     const urnElements = [];
     for (const r of searchRoots) {
@@ -456,42 +454,38 @@
       for (const c of children) urnElements.push(c);
     }
     
-    // First pass: media IDs (digitalmediaAsset, fs_video, dms, video)
     for (const el of urnElements) {
       for (const attrName of ['data-entity-urn', 'data-urn', 'data-chameleon-urn', 'data-activity-urn']) {
         const val = el.getAttribute ? el.getAttribute(attrName) : '';
-        if (val) {
-          const vm = val.match(/(?:digitalmediaAsset|fs_video|video|dms):([A-Za-z0-9_-]{8,})/i) || val.match(/([CD][A-Za-z0-9_-]{8,})/);
-          if (vm) {
-            if (!info.mediaKey) info.mediaKey = vm[1];
-            info.allKeys.add(vm[1]);
+        if (!val || typeof val !== 'string') continue;
+
+        info.allKeys.add(val);
+
+        // Clean LinkedIn URN format: urn:li:<type>:<id>
+        if (val.startsWith('urn:li:')) {
+          const parts = val.split(':');
+          const type = parts[2] ? parts[2].toLowerCase() : '';
+          const id = parts.slice(3).join(':');
+          if (id) {
+            info.allKeys.add(id);
+            if (/^(digitalmediaasset|fs_video|video|dms|media)$/i.test(type)) {
+              if (!info.mediaKey) info.mediaKey = id;
+            } else if (/^(activity|ugcpost|share)$/i.test(type)) {
+              if (!info.activityUrn) info.activityUrn = id;
+            }
           }
         }
       }
     }
 
-    // Second pass: activity/post URNs
-    for (const el of urnElements) {
-      for (const attrName of ['data-urn', 'data-entity-urn', 'data-chameleon-urn', 'data-activity-urn']) {
-        const val = el.getAttribute ? el.getAttribute(attrName) : '';
-        if (val) {
-          const am = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
-          if (am) {
-            if (!info.activityUrn) info.activityUrn = am[1];
-            info.allKeys.add(am[1]);
-            info.allKeys.add(am[0]);
-          }
-        }
+    // 5. Scoped innerHTML search for media URL patterns if not yet found
+    if (!info.mediaKey) {
+      const html = container.innerHTML || '';
+      const hm = html.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i);
+      if (hm) {
+        info.mediaKey = hm[1];
+        info.allKeys.add(hm[1]);
       }
-    }
-
-    // 5. Scoped innerHTML search for media ID
-    const html = container.innerHTML || '';
-    const hm = html.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i) ||
-               html.match(/([CD][A-Za-z0-9_-]{8,})/);
-    if (hm) {
-      if (!info.mediaKey) info.mediaKey = hm[1];
-      info.allKeys.add(hm[1]);
     }
 
     info.primaryKey = info.mediaKey || info.activityUrn || '';
