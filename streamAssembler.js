@@ -16,6 +16,25 @@
   'use strict';
 
   /**
+   * Universal URL resolver that preserves authenticated CDN query parameters
+   * (e.g., ?e=...&v=beta&t=...) when resolving relative manifest segment URLs.
+   */
+  function resolveUrl(relativeOrAbsolute, baseUrl) {
+    if (!relativeOrAbsolute) return '';
+    if (!baseUrl) return relativeOrAbsolute;
+    try {
+      const resolved = new URL(relativeOrAbsolute, baseUrl);
+      if (!resolved.search && baseUrl.includes('?')) {
+        const baseObj = new URL(baseUrl);
+        resolved.search = baseObj.search;
+      }
+      return resolved.href;
+    } catch {
+      return relativeOrAbsolute;
+    }
+  }
+
+  /**
    * Parse an HLS (m3u8) playlist.
    */
   function parseM3U8(content, baseUrl) {
@@ -38,7 +57,7 @@
 
           const uriLine = lines[i + 1];
           if (uriLine && !uriLine.startsWith('#')) {
-            const uri = new URL(uriLine, baseUrl).href;
+            const uri = resolveUrl(uriLine, baseUrl);
             const isAvc = (codecs.includes('avc') || codecs.includes('h264')) && !codecs.includes('av01');
             const hasAudio = codecs.includes('mp4a') || codecs.includes('aac');
             variants.push({ uri, bw, codecs, width, height, isAvc, hasAudio });
@@ -67,10 +86,10 @@
       if (line.startsWith('#EXT-X-MAP:')) {
         const match = line.match(/URI=["']([^"']+)["']/);
         if (match) {
-          initUri = new URL(match[1], baseUrl).href;
+          initUri = resolveUrl(match[1], baseUrl);
         }
       } else if (!line.startsWith('#') && line.length > 0) {
-        segments.push(new URL(line, baseUrl).href);
+        segments.push(resolveUrl(line, baseUrl));
       }
     }
 
@@ -133,20 +152,15 @@
         // Check 1: <SegmentList>
         const initMatch = /<Initialization\b[^>]*sourceURL=["']([^"']*)["']/i.exec(repBody);
         if (initMatch) {
-          initUrl = initMatch[1].replace(/&amp;/g, '&');
-          if (baseUrl && !initUrl.startsWith('http')) {
-            initUrl = new URL(initUrl, baseUrl).href;
-          }
+          const rawInit = initMatch[1].replace(/&amp;/g, '&');
+          initUrl = resolveUrl(rawInit, baseUrl);
         }
 
         const segRegex = /<SegmentURL\b[^>]*media=["']([^"']*)["']/gi;
         let segMatch;
         while ((segMatch = segRegex.exec(repBody)) !== null) {
-          let segUrl = segMatch[1].replace(/&amp;/g, '&');
-          if (baseUrl && !segUrl.startsWith('http')) {
-            segUrl = new URL(segUrl, baseUrl).href;
-          }
-          segments.push(segUrl);
+          const rawSeg = segMatch[1].replace(/&amp;/g, '&');
+          segments.push(resolveUrl(rawSeg, baseUrl));
         }
 
         // Check 2: <SegmentTemplate> inside Representation or inherited from AdaptationSet
@@ -161,8 +175,8 @@
             const timescaleVal = parseInt(getAttr(tplAttrs, 'timescale') || '1', 10);
 
             if (initTpl) {
-              initUrl = initTpl.replace(/\$RepresentationID\$/g, id).replace(/&amp;/g, '&');
-              if (baseUrl && !initUrl.startsWith('http')) initUrl = new URL(initUrl, baseUrl).href;
+              const rawInit = initTpl.replace(/\$RepresentationID\$/g, id).replace(/&amp;/g, '&');
+              initUrl = resolveUrl(rawInit, baseUrl);
             }
 
             // Estimate segment count from manifest mediaPresentationDuration or timeline
@@ -176,13 +190,12 @@
               const segCount = Math.ceil(totalSeconds / segDuration);
 
               for (let n = startNum; n < startNum + segCount; n++) {
-                let segUrl = mediaTpl
+                const segRaw = mediaTpl
                   .replace(/\$RepresentationID\$/g, id)
                   .replace(/\$Number%0(\d+)d\$/g, (_, pad) => String(n).padStart(parseInt(pad, 10), '0'))
                   .replace(/\$Number\$/g, String(n))
                   .replace(/&amp;/g, '&');
-                if (baseUrl && !segUrl.startsWith('http')) segUrl = new URL(segUrl, baseUrl).href;
-                segments.push(segUrl);
+                segments.push(resolveUrl(segRaw, baseUrl));
               }
             }
           }

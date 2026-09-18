@@ -404,9 +404,14 @@
       if (!blobUrl) return null;
       let record = this.playlistsByBlob.get(blobUrl);
       if (record && !record.manifestUrl && !record.progressiveUrl) {
-        // Try linking to unattached stream
-        for (const [key, u] of this.unattachedStreams.entries()) {
-          if ((record.entityKey && entityKeysMatch(record.entityKey, key)) || this.unattachedStreams.size === 1) {
+        // Try linking to unattached stream sorted by most recent activity
+        const sortedUnattached = Array.from(this.unattachedStreams.entries())
+          .sort((a, b) => (b[1].lastActive || 0) - (a[1].lastActive || 0));
+        for (const [key, u] of sortedUnattached) {
+          const keyMatches = record.entityKey && entityKeysMatch(record.entityKey, key);
+          const singleStream = this.unattachedStreams.size === 1;
+          const recent = (Date.now() - (u.lastActive || 0)) < 60000;
+          if (keyMatches || singleStream || recent) {
             if (u.manifestUrl) record.setManifest(u.manifestUrl, u.manifestXml || '');
             if (u.progressiveUrl) record.progressiveUrl = u.progressiveUrl;
             if (u.representations) record.representations = u.representations;
@@ -425,7 +430,7 @@
      * Uses deterministic hierarchy:
      * 1. Direct blobUrl match (100% isolate)
      * 2. Direct/fuzzy entityKey match
-     * 3. Tab/unattached stream match
+     * 3. Tab/unattached stream match (prioritizing most recently active)
      * 4. Duration-compatible stream
      */
     findStreamForVideo(videoInfo = {}) {
@@ -453,7 +458,9 @@
             return entRecord;
           }
         }
-        for (const [key, u] of this.unattachedStreams.entries()) {
+        const sortedUnattached = Array.from(this.unattachedStreams.entries())
+          .sort((a, b) => (b[1].lastActive || 0) - (a[1].lastActive || 0));
+        for (const [key, u] of sortedUnattached) {
           if (entityKeysMatch(entityKey, key)) {
             if (record) {
               if (u.manifestUrl) record.setManifest(u.manifestUrl, u.manifestXml || '');
@@ -485,12 +492,15 @@
         }
       }
 
-      // Tier 3: If record exists but is missing manifest, check if unattached stream exists for this tab or single active stream
+      // Tier 3: If record exists but is missing manifest, check if unattached stream exists for this tab or active stream
       if (this.unattachedStreams.size > 0) {
-        for (const [key, u] of this.unattachedStreams.entries()) {
+        const sortedUnattached = Array.from(this.unattachedStreams.entries())
+          .sort((a, b) => (b[1].lastActive || 0) - (a[1].lastActive || 0));
+        for (const [key, u] of sortedUnattached) {
           const tabMatch = tabId && u.tabId && u.tabId === tabId;
           const singleStream = this.unattachedStreams.size === 1;
-          if (tabMatch || singleStream) {
+          const recent = (Date.now() - (u.lastActive || 0)) < 60000;
+          if (tabMatch || singleStream || recent) {
             if (record) {
               if (u.manifestUrl) record.setManifest(u.manifestUrl, u.manifestXml || '');
               if (u.progressiveUrl) record.progressiveUrl = u.progressiveUrl;
