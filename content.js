@@ -870,8 +870,9 @@
         };
       }
 
-      // If we already have locked onto manifest or segments after 600ms, proceed
-      if (Date.now() - startTime >= 600 && (state.manifestUrl || (state.allSegments && state.allSegments.length > 0))) {
+      // Allow adequate time for React Fiber inspection to return progressiveStreams.
+      // If after 1600ms no progressive URL is found but manifest/segments are locked, proceed.
+      if (Date.now() - startTime >= 1600 && (state.manifestUrl || (state.allSegments && state.allSegments.length > 0))) {
         break;
       }
 
@@ -956,8 +957,10 @@
         safeSendMessage({ action: 'streamProgress', videoId: state.id, completed, total, pct });
       };
 
+      const vidDur = state.video ? (state.video.duration || 0) : (state.duration || 0);
       const result = await assembler.downloadStream(streamUrl, onProgress, {
         manifestText,
+        duration: vidDur,
         customFetchText,
         customFetchBuffer
       });
@@ -1147,8 +1150,16 @@
         ? stream.allSegments
         : (state.allSegments && state.allSegments.length > 0 ? state.allSegments : null);
       if (segs && segs.length > 0) {
-        await downloadFromSegmentQueue(state, segs);
-        return;
+        const vidDuration = state.video ? (state.video.duration || 0) : (state.duration || 0);
+        // Each segment is typically 2-4 seconds. If video duration is known (>15s),
+        // ensure we have enough segments to cover at least 80% of the full video.
+        const minExpectedSegments = vidDuration > 15 ? Math.floor((vidDuration * 0.8) / 4.0) : 1;
+        if (segs.length >= minExpectedSegments) {
+          await downloadFromSegmentQueue(state, segs);
+          return;
+        } else {
+          console.warn(`[Garrett] Segment queue only has ${segs.length} segments for a ${Math.round(vidDuration)}s video (needs ~${minExpectedSegments}). Avoiding partial cutoff.`);
+        }
       }
 
       // Path 5: Final active media stream lock from performance resource entries

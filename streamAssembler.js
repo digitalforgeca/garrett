@@ -109,14 +109,55 @@
   }
 
   /**
+   * Parse ISO 8601 duration string (e.g. PT1M41.5S, PT36S, PT1H2M3S, P1DT2H).
+   * Returns total duration in seconds.
+   */
+  function parseIsoDuration(str) {
+    if (!str || typeof str !== 'string') return 0;
+    const m = str.match(/P(?:(\d+(?:\.\d+)?)D)?T?(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?/i);
+    if (!m) return 0;
+    const days = parseFloat(m[1] || 0);
+    const hours = parseFloat(m[2] || 0);
+    const minutes = parseFloat(m[3] || 0);
+    const seconds = parseFloat(m[4] || 0);
+    return (days * 86400) + (hours * 3600) + (minutes * 60) + seconds;
+  }
+
+  /**
+   * Expands MPEG-DASH template identifiers ($RepresentationID$, $Number$, $Time$, $Bandwidth$).
+   */
+  function expandTemplate(template, repId, bandwidth, number, time) {
+    if (!template) return '';
+    return template
+      .replace(/\$RepresentationID\$/g, String(repId != null ? repId : ''))
+      .replace(/\$Bandwidth%0(\d+)d\$/g, (_, pad) => String(bandwidth || 0).padStart(parseInt(pad, 10), '0'))
+      .replace(/\$Bandwidth\$/g, String(bandwidth || ''))
+      .replace(/\$Number%0(\d+)d\$/g, (_, pad) => String(number || 0).padStart(parseInt(pad, 10), '0'))
+      .replace(/\$Number\$/g, String(number != null ? number : ''))
+      .replace(/\$Time%0(\d+)d\$/g, (_, pad) => String(time || 0).padStart(parseInt(pad, 10), '0'))
+      .replace(/\$Time\$/g, String(time != null ? time : ''))
+      .replace(/\$\$/g, '$')
+      .replace(/&amp;/g, '&');
+  }
+
+  /**
    * Parse an MPEG-DASH (.mpd) XML manifest.
    * Thoroughly inspects AdaptationSet and Representation elements.
-   * Handles both <SegmentList> and <SegmentTemplate> structures.
+   * Handles <SegmentTimeline>, <SegmentList>, and static <SegmentTemplate> structures.
    */
-  function parseDashMpd(xmlText, baseUrl) {
+  function parseDashMpd(xmlText, baseUrl, options = {}) {
     const representations = [];
+    if (!xmlText) return representations;
 
-    // Parse each AdaptationSet block
+    // 1. Extract total duration from MPD or Period, or options.duration fallback
+    const mpdDurMatch = xmlText.match(/\bmediaPresentationDuration=["']([^"']+)["']/i);
+    const periodDurMatch = xmlText.match(/<Period\b[^>]*\bduration=["']([^"']+)["']/i);
+    const totalDurationSeconds =
+      (mpdDurMatch ? parseIsoDuration(mpdDurMatch[1]) : 0) ||
+      (periodDurMatch ? parseIsoDuration(periodDurMatch[1]) : 0) ||
+      (options && typeof options.duration === 'number' && options.duration > 0 ? options.duration : 0);
+
+    // 2. Parse each AdaptationSet block
     const adaptRegex = /<AdaptationSet\b([^>]*)>([\s\S]*?)<\/AdaptationSet>/gi;
     let adaptMatch;
 
@@ -128,16 +169,17 @@
       const adaptMime = getAttr(adaptAttrs, 'mimeType').toLowerCase();
       const adaptCodecs = getAttr(adaptAttrs, 'codecs').toLowerCase();
 
-      // Look for SegmentTemplate defined at AdaptationSet level if any
+      // Look for SegmentTemplate or SegmentList defined at AdaptationSet level
       const adaptTemplateMatch = /<SegmentTemplate\b([^>]*?)(?:\/>|>([\s\S]*?)<\/SegmentTemplate>)/i.exec(adaptBody);
+      const adaptListMatch = /<SegmentList\b([^>]*?)(?:\/>|>([\s\S]*?)<\/SegmentList>)/i.exec(adaptBody);
 
-      // Parse each Representation within this AdaptationSet
-      const repRegex = /<Representation\b([^>]*)>([\s\S]*?)<\/Representation>/gi;
+      // Parse each Representation within this AdaptationSet (both block <Representation>...</Representation> and self-closing <Representation.../>)
+      const repRegex = /<Representation\b([^>]*?)(?:\/>|>([\s\S]*?)<\/Representation>)/gi;
       let repMatch;
 
       while ((repMatch = repRegex.exec(adaptBody)) !== null) {
         const repAttrs = repMatch[1];
-        const repBody = repMatch[2];
+        const repBody = repMatch[2] || '';
 
         const id = getAttr(repAttrs, 'id');
         const bandwidth = parseInt(getAttr(repAttrs, 'bandwidth') || '0', 10);
@@ -149,59 +191,97 @@
         let initUrl = '';
         const segments = [];
 
-        // Check 1: <SegmentList>
-        const initMatch = /<Initialization\b[^>]*sourceURL=["']([^"']*)["']/i.exec(repBody);
+        // Check 1: <SegmentList> (Representation level or AdaptationSet level)
+        const initMatch = /<Initialization\b[^>]*sourceURL=["']([^"']*)["']/i.exec(repBody) ||
+                          /<Initialization\b[^>]*sourceURL=["']([^"']*)["']/i.exec(adaptBody);
         if (initMatch) {
-          const rawInit = initMatch[1].replace(/&amp;/g, '&');
-          initUrl = resolveUrl(rawInit, baseUrl);
+          initUrl = resolveUrl(initMatch[1].replace(/&amp;/g, '&'), baseUrl);
         }
 
         const segRegex = /<SegmentURL\b[^>]*media=["']([^"']*)["']/gi;
         let segMatch;
         while ((segMatch = segRegex.exec(repBody)) !== null) {
-          const rawSeg = segMatch[1].replace(/&amp;/g, '&');
-          segments.push(resolveUrl(rawSeg, baseUrl));
+          segments.push(resolveUrl(segMatch[1].replace(/&amp;/g, '&'), baseUrl));
+        }
+        if (segments.length === 0 && adaptListMatch) {
+          while ((segMatch = segRegex.exec(adaptBody)) !== null) {
+            segments.push(resolveUrl(segMatch[1].replace(/&amp;/g, '&'), baseUrl));
+          }
         }
 
-        // Check 2: <SegmentTemplate> inside Representation or inherited from AdaptationSet
+        // Check 2: <SegmentTemplate> (Representation level or inherited from AdaptationSet)
         if (segments.length === 0) {
-          const tplMatch = /<SegmentTemplate\b([^>]*?)(?:\/>|>([\s\S]*?)<\/SegmentTemplate>)/i.exec(repBody) || adaptTemplateMatch;
-          if (tplMatch) {
-            const tplAttrs = tplMatch[1];
-            const initTpl = getAttr(tplAttrs, 'initialization');
-            const mediaTpl = getAttr(tplAttrs, 'media');
-            const startNum = parseInt(getAttr(tplAttrs, 'startNumber') || '1', 10);
-            const durationVal = parseInt(getAttr(tplAttrs, 'duration') || '0', 10);
-            const timescaleVal = parseInt(getAttr(tplAttrs, 'timescale') || '1', 10);
+          const repTemplateMatch = /<SegmentTemplate\b([^>]*?)(?:\/>|>([\s\S]*?)<\/SegmentTemplate>)/i.exec(repBody);
+          const tplAttrs = (repTemplateMatch ? repTemplateMatch[1] : '') + ' ' + (adaptTemplateMatch ? adaptTemplateMatch[1] : '');
 
-            if (initTpl) {
-              const rawInit = initTpl.replace(/\$RepresentationID\$/g, id).replace(/&amp;/g, '&');
-              initUrl = resolveUrl(rawInit, baseUrl);
-            }
+          const initTpl = getAttr(tplAttrs, 'initialization');
+          const mediaTpl = getAttr(tplAttrs, 'media');
+          const startNum = parseInt(getAttr(tplAttrs, 'startNumber') || '1', 10);
+          const durationVal = parseInt(getAttr(tplAttrs, 'duration') || '0', 10);
+          const timescaleVal = parseInt(getAttr(tplAttrs, 'timescale') || '1', 10);
 
-            // Estimate segment count from manifest mediaPresentationDuration or timeline
-            const durMatch = /mediaPresentationDuration=["']PT(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?["']/i.exec(xmlText);
-            if (durMatch && durationVal > 0) {
-              const hours = parseFloat(durMatch[1] || '0');
-              const minutes = parseFloat(durMatch[2] || '0');
-              const seconds = parseFloat(durMatch[3] || '0');
-              const totalSeconds = (hours * 3600) + (minutes * 60) + seconds;
-              const segDuration = durationVal / timescaleVal;
-              const segCount = Math.ceil(totalSeconds / segDuration);
+          if (initTpl && !initUrl) {
+            const rawInit = expandTemplate(initTpl, id, bandwidth, startNum, 0);
+            initUrl = resolveUrl(rawInit, baseUrl);
+          }
 
-              for (let n = startNum; n < startNum + segCount; n++) {
-                const segRaw = mediaTpl
-                  .replace(/\$RepresentationID\$/g, id)
-                  .replace(/\$Number%0(\d+)d\$/g, (_, pad) => String(n).padStart(parseInt(pad, 10), '0'))
-                  .replace(/\$Number\$/g, String(n))
-                  .replace(/&amp;/g, '&');
-                segments.push(resolveUrl(segRaw, baseUrl));
+          // Case A: <SegmentTimeline> present (primary structure for LinkedIn, DASH-IF, Shaka)
+          const timelineMatch = /<SegmentTimeline\b[^>]*>([\s\S]*?)<\/SegmentTimeline>/i.exec(repBody) ||
+                                /<SegmentTimeline\b[^>]*>([\s\S]*?)<\/SegmentTimeline>/i.exec(adaptBody);
+
+          if (timelineMatch && mediaTpl) {
+            const sRegex = /<S\b([^>]*?)(?:\/>|>([\s\S]*?)<\/S>)/gi;
+            let sMatch;
+            let currentTime = 0;
+            let currentNum = startNum;
+
+            while ((sMatch = sRegex.exec(timelineMatch[1])) !== null) {
+              const sAttrs = sMatch[1];
+              const tVal = getAttr(sAttrs, 't');
+              const dVal = parseInt(getAttr(sAttrs, 'd') || '0', 10);
+              const rVal = parseInt(getAttr(sAttrs, 'r') || '0', 10);
+
+              if (tVal) {
+                currentTime = parseInt(tVal, 10);
               }
+
+              let count = 1;
+              if (rVal > 0) {
+                count = rVal + 1;
+              } else if (rVal < 0) {
+                // r="-1" repeats until period duration
+                if (dVal > 0 && totalDurationSeconds > 0 && timescaleVal > 0) {
+                  const maxTime = totalDurationSeconds * timescaleVal;
+                  count = (maxTime > currentTime) ? Math.ceil((maxTime - currentTime) / dVal) : 1;
+                } else {
+                  count = 1;
+                }
+              }
+
+              for (let k = 0; k < count; k++) {
+                const segRaw = expandTemplate(mediaTpl, id, bandwidth, currentNum, currentTime);
+                segments.push(resolveUrl(segRaw, baseUrl));
+                currentNum++;
+                currentTime += dVal;
+              }
+            }
+          } else if (durationVal > 0 && mediaTpl && totalDurationSeconds > 0) {
+            // Case B: Static duration on <SegmentTemplate> with presentation duration
+            const segDuration = durationVal / timescaleVal;
+            const segCount = Math.ceil(totalDurationSeconds / segDuration);
+            let currentTime = 0;
+            let currentNum = startNum;
+
+            for (let n = 0; n < segCount; n++) {
+              const segRaw = expandTemplate(mediaTpl, id, bandwidth, currentNum, currentTime);
+              segments.push(resolveUrl(segRaw, baseUrl));
+              currentNum++;
+              currentTime += durationVal;
             }
           }
         }
 
-        if (initUrl && segments.length > 0) {
+        if (segments.length > 0) {
           // Check codec flags
           const urlLower = (initUrl + (segments[0] || '')).toLowerCase();
           const isAv1 = codecs.includes('av01') || codecs.includes('av1') || urlLower.includes('av1');
@@ -249,6 +329,13 @@
       return b.bandwidth - a.bandwidth;
     });
 
+    const videoReps = representations.filter(r => !r.hasAudio || (r.width > 0 && r.height > 0));
+    const audioReps = representations.filter(r => r.hasAudio && (!r.width || r.width === 0) && (!r.height || r.height === 0));
+    if (videoReps.length > 0 && audioReps.length > 0) {
+      audioReps.sort((a, b) => b.bandwidth - a.bandwidth);
+      videoReps[0].audioRepresentation = audioReps[0];
+    }
+
     return representations;
   }
 
@@ -258,7 +345,7 @@
    * 
    * @param {string} manifestUrl
    * @param {function} onProgress (completed, total, pct)
-   * @param {object} options { customFetchBuffer, customFetchText }
+   * @param {object} options { customFetchBuffer, customFetchText, manifestText, duration }
    */
   async function downloadStream(manifestUrl, onProgress, options = {}) {
     const fetchText = options.customFetchText || (async (u) => {
@@ -277,12 +364,14 @@
 
     // 1. DASH Manifest (.mpd or /dash/)
     if (text.includes('<MPD') || manifestUrl.includes('/dash/') || manifestUrl.includes('.mpd')) {
-      const reps = parseDashMpd(text, manifestUrl);
+      const reps = parseDashMpd(text, manifestUrl, options);
       if (!reps || reps.length === 0) {
         throw new Error('No valid video representations found in DASH manifest.');
       }
       const best = reps[0];
-      const allUrls = [best.initUrl, ...best.segments];
+      const allUrls = [];
+      if (best.initUrl) allUrls.push(best.initUrl);
+      allUrls.push(...best.segments);
       const result = await assembleSegments(allUrls, 'video/mp4', 'mp4', onProgress, fetchBuffer);
       return { ...result, representation: best };
     }

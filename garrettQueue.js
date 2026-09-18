@@ -299,13 +299,17 @@
       const entityKey = meta.entityKey || extractStreamKey(url);
       const format = (xml.includes('<MPD') || url.includes('dash')) ? 'DASH' : 'HLS';
 
+      // Check if a BlobStreamRecord exists for this entityKey
+      let record = entityKey ? this.playlistsByEntity.get(entityKey) : null;
+
       // Parse representations if XML is present
       let reps = [];
       const assembler = typeof globalThis !== 'undefined' ? globalThis.GarrettStreamAssembler : null;
       if (assembler && xml) {
         try {
           if (format === 'DASH') {
-            reps = assembler.parseDashMpd(xml, url);
+            const knownDuration = (meta && meta.duration) || (record && record.duration) || 0;
+            reps = assembler.parseDashMpd(xml, url, { duration: knownDuration });
           } else if (format === 'HLS') {
             const parsed = assembler.parseM3U8(xml, url);
             if (parsed && parsed.type === 'media') {
@@ -318,8 +322,6 @@
         } catch (e) {}
       }
 
-      // Check if a BlobStreamRecord exists for this entityKey
-      let record = entityKey ? this.playlistsByEntity.get(entityKey) : null;
       if (record) {
         record.setManifest(url, xml);
         if (reps && reps.length > 0) {
