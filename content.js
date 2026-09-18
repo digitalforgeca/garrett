@@ -419,7 +419,7 @@
     const poster = video.getAttribute('poster') || video.poster || '';
     if (poster) {
       const pm = poster.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i) ||
-                 poster.match(/([CD]\d{2}[A-Za-z0-9_-]{8,})/);
+                 poster.match(/([CD][A-Za-z0-9_-]{8,})/);
       if (pm) {
         info.mediaKey = pm[1];
         info.allKeys.add(pm[1]);
@@ -440,7 +440,7 @@
     for (const el of thumbElements) {
       const src = el.src || el.getAttribute('src') || el.getAttribute('style') || '';
       const m = src.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i) ||
-                src.match(/([CD]\d{2}[A-Za-z0-9_-]{8,})/);
+                src.match(/([CD][A-Za-z0-9_-]{8,})/);
       if (m) {
         if (!info.mediaKey) info.mediaKey = m[1];
         info.allKeys.add(m[1]);
@@ -461,7 +461,7 @@
       for (const attrName of ['data-entity-urn', 'data-urn', 'data-chameleon-urn', 'data-activity-urn']) {
         const val = el.getAttribute ? el.getAttribute(attrName) : '';
         if (val) {
-          const vm = val.match(/(?:digitalmediaAsset|fs_video|video|dms):([A-Za-z0-9_-]{8,})/i) || val.match(/([CD]\d{2}[A-Za-z0-9_-]{8,})/);
+          const vm = val.match(/(?:digitalmediaAsset|fs_video|video|dms):([A-Za-z0-9_-]{8,})/i) || val.match(/([CD][A-Za-z0-9_-]{8,})/);
           if (vm) {
             if (!info.mediaKey) info.mediaKey = vm[1];
             info.allKeys.add(vm[1]);
@@ -488,7 +488,7 @@
     // 5. Scoped innerHTML search for media ID
     const html = container.innerHTML || '';
     const hm = html.match(/(?:dms\/image\/(?:sync\/)?(?:v2\/)?|videocover[^\/]*\/|playlist\/vid\/(?:v2\/|dash\/)?)\/?([A-Za-z0-9_-]{8,})/i) ||
-               html.match(/([CD]\d{2}[A-Za-z0-9_-]{8,})/);
+               html.match(/([CD][A-Za-z0-9_-]{8,})/);
     if (hm) {
       if (!info.mediaKey) info.mediaKey = hm[1];
       info.allKeys.add(hm[1]);
@@ -732,7 +732,7 @@
             if (m1) nodeKeys.push(m1[1]);
             const m2 = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
             if (m2) nodeKeys.push(m2[1]);
-            const m3 = val.match(/([CD]\d{2}[A-Za-z0-9_-]{8,})/);
+            const m3 = val.match(/([CD][A-Za-z0-9_-]{8,})/);
             if (m3) nodeKeys.push(m3[1]);
           };
           if (node.urn) checkNodeVal(node.urn);
@@ -772,7 +772,7 @@
             if (m1) allKeys.add(m1[1]);
             const m2 = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
             if (m2) allKeys.add(m2[1]);
-            const m3 = val.match(/([CD]\d{2}[A-Za-z0-9_-]{8,})/);
+            const m3 = val.match(/([CD][A-Za-z0-9_-]{8,})/);
             if (m3) allKeys.add(m3[1]);
           };
 
@@ -1159,20 +1159,40 @@
 
       // Check performance resource entries for manifests or progressive MP4s
       try {
+        if (state.allSegments && state.allSegments.length > 0) {
+          for (const seg of state.allSegments) {
+            const k = extractStreamKey(seg);
+            if (k) {
+              if (!state.mediaKey) state.mediaKey = k;
+              if (state.allKeys) state.allKeys.add(k);
+              if (!state.entityKey || /^\d+$/.test(state.entityKey)) state.entityKey = k;
+              break;
+            }
+          }
+        }
+
         const resEntries = performance.getEntriesByType('resource');
         const isPlaying = video && (!video.paused || video.currentTime > 0);
+        const otherPlaying = Array.from(videoRegistry.values()).filter(other => other !== state && other.video && !other.video.paused);
 
         for (let i = resEntries.length - 1; i >= 0; i--) {
           const name = resEntries[i].name;
           if (isNonMediaUrl(name)) continue;
 
+          const nameKey = extractStreamKey(name);
           let matchesKey = state.entityKey ? entityKeysMatch(state.entityKey, name) : false;
+          if (!matchesKey && nameKey && state.mediaKey) {
+            matchesKey = entityKeysMatch(state.mediaKey, nameKey);
+          }
           if (!matchesKey && state.allKeys) {
             for (const k of state.allKeys) {
-              if (entityKeysMatch(k, name)) { matchesKey = true; break; }
+              if (entityKeysMatch(k, name) || (nameKey && entityKeysMatch(k, nameKey))) { matchesKey = true; break; }
             }
           }
-          if (!matchesKey && isPlaying && videoRegistry.size === 1 && (resEntries.length - 1 - i < 15)) {
+          if (!matchesKey && nameKey && state.allSegments && state.allSegments.length > 0) {
+            matchesKey = state.allSegments.some(s => extractStreamKey(s) === nameKey);
+          }
+          if (!matchesKey && isPlaying && otherPlaying.length === 0 && (resEntries.length - 1 - i < 20)) {
             if (name.includes('/playlist/vid/') || name.includes('/dash/')) {
               matchesKey = true;
             }
@@ -1182,7 +1202,7 @@
             // Guard: ensure this URL is not already claimed by another video in videoRegistry!
             const isClaimedByOther = Array.from(videoRegistry.values()).some(other => other !== state && (other.progressiveUrl === name || other.manifestUrl === name));
             if (isClaimedByOther) continue;
-            const streamKey = extractStreamKey(name);
+            const streamKey = nameKey || extractStreamKey(name);
             if (streamKey && !state.mediaKey) state.mediaKey = streamKey;
             if (streamKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
               state.entityKey = streamKey;
@@ -1294,7 +1314,8 @@
 
       // Allow adequate time for React Fiber inspection to return progressiveStreams.
       // If after 2000ms no progressive URL is found, proceed only if manifest or substantial segments are locked.
-      const hasSubstantialSegments = state.allSegments && state.allSegments.length >= 6;
+      const expectedSegments = (state.duration && state.duration > 5) ? Math.ceil(state.duration / 4.5) : 15;
+      const hasSubstantialSegments = state.allSegments && state.allSegments.length >= Math.max(6, Math.floor(expectedSegments * 0.85));
       if (Date.now() - startTime >= 2000 && (state.manifestUrl || hasSubstantialSegments)) {
         break;
       }
@@ -1488,6 +1509,50 @@
         }
       }
 
+      // Incomplete segment sequence protection: If presentation is long but we only have partial buffered segments,
+      // perform aggressive manifest recovery before assembling an incomplete truncation
+      if (realDur > 15 && urlsToDownload.length < Math.floor(expectedMinChunks * 0.85)) {
+        const curSrc = state.video ? (state.video.currentSrc || state.video.src || '') : '';
+        window.dispatchEvent(new CustomEvent('__GARRETT_QUERY_REACT_STREAM__', {
+          detail: { videoId: state.id, blobUrl: curSrc }
+        }));
+        window.dispatchEvent(new CustomEvent('__GARRETT_REQUEST_CACHED_TELEMETRY__'));
+        await new Promise(r => setTimeout(r, 600));
+
+        if (state.progressiveUrl && isGenuineProgressiveMp4Url(state.progressiveUrl)) {
+          state.isDownloading = false;
+          return await keepVideoNow(state);
+        }
+
+        if (!state.manifestUrl) {
+          try {
+            const resEntries = performance.getEntriesByType('resource');
+            for (let i = resEntries.length - 1; i >= 0; i--) {
+              const name = resEntries[i].name;
+              if (isNonMediaUrl(name)) continue;
+              const isDashOrHls = (name.includes('.mpd') || name.includes('/dash/') || name.includes('.m3u8') || (name.includes('/playlist/vid/') && name.includes('manifest'))) &&
+                !name.includes('.m4s') && !name.includes('.ts') && !name.includes('.init') && !name.includes('/init') && !/\/[0-9]+\/[0-9]+(?:\?|$)/.test(name);
+              if (isDashOrHls) {
+                const nameKey = extractStreamKey(name);
+                const matchesKey = (nameKey && state.allSegments && state.allSegments.some(s => extractStreamKey(s) === nameKey)) ||
+                                   (state.mediaKey && nameKey && entityKeysMatch(state.mediaKey, nameKey)) ||
+                                   (state.entityKey && entityKeysMatch(state.entityKey, name));
+                if (matchesKey || videoRegistry.size === 1) {
+                  state.manifestUrl = name;
+                  if (queue) queue.registerManifest(name);
+                  break;
+                }
+              }
+            }
+          } catch (e) {}
+        }
+
+        if (state.manifestUrl) {
+          state.isDownloading = false;
+          return await downloadStreamInPage(state, state.manifestUrl, state.manifestXml);
+        }
+      }
+
       // If after all checks we only have <= 3 segments and < 3 raw chunks, NEVER assemble a 4s snippet!
       if (urlsToDownload.length <= 3 && rawChunks.length < 3) {
         // One final check for React Fiber progressive stream
@@ -1586,6 +1651,7 @@
     }
 
     try {
+      window.dispatchEvent(new CustomEvent('__GARRETT_REQUEST_CACHED_TELEMETRY__'));
       // 1. Resolve stream via Garrett Multi-Tier Discovery
       const stream = await resolveStreamForVideo(state, 2500);
 
@@ -1634,8 +1700,23 @@
 
       // If manifest URL was not yet set, scan performance resource entries BEFORE segment queue
       if (!manifestUrl) {
+        if (state.allSegments && state.allSegments.length > 0) {
+          for (const seg of state.allSegments) {
+            const k = extractStreamKey(seg);
+            if (k) {
+              if (!state.mediaKey) state.mediaKey = k;
+              if (state.allKeys) state.allKeys.add(k);
+              if (!state.entityKey || /^\d+$/.test(state.entityKey)) state.entityKey = k;
+              break;
+            }
+          }
+        }
+
         try {
           const resEntries = performance.getEntriesByType('resource');
+          const isPlaying = state.video && (!state.video.paused || state.video.currentTime > 0);
+          const otherPlaying = Array.from(videoRegistry.values()).filter(other => other !== state && other.video && !other.video.paused);
+
           for (let i = resEntries.length - 1; i >= 0; i--) {
             const name = resEntries[i].name;
             if (isNonMediaUrl(name)) continue;
@@ -1645,12 +1726,23 @@
               const isClaimedByOther = Array.from(videoRegistry.values()).some(other => other !== state && (other.progressiveUrl === name || other.manifestUrl === name));
               if (isClaimedByOther) continue;
 
+              const nameKey = extractStreamKey(name);
               let matchesKey = state.entityKey ? entityKeysMatch(state.entityKey, name) : false;
+              if (!matchesKey && nameKey && state.mediaKey) {
+                matchesKey = entityKeysMatch(state.mediaKey, nameKey);
+              }
               if (!matchesKey && state.allKeys) {
                 for (const k of state.allKeys) {
-                  if (entityKeysMatch(k, name)) { matchesKey = true; break; }
+                  if (entityKeysMatch(k, name) || (nameKey && entityKeysMatch(k, nameKey))) { matchesKey = true; break; }
                 }
               }
+              if (!matchesKey && nameKey && state.allSegments && state.allSegments.length > 0) {
+                matchesKey = state.allSegments.some(seg => extractStreamKey(seg) === nameKey);
+              }
+              if (!matchesKey && isPlaying && otherPlaying.length === 0 && (resEntries.length - 1 - i < 20)) {
+                matchesKey = true;
+              }
+
               if (matchesKey || videoRegistry.size === 1) {
                 manifestUrl = name;
                 state.manifestUrl = name;
@@ -1785,6 +1877,7 @@
 
   // Initial scan
   scanForVideos();
+  window.dispatchEvent(new CustomEvent('__GARRETT_REQUEST_CACHED_TELEMETRY__'));
 
   // Listen to messages from popup or background
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {

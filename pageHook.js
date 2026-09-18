@@ -4,6 +4,10 @@
   if (window.__GARRETT_MAIN_HOOK_INSTALLED__) return;
   window.__GARRETT_MAIN_HOOK_INSTALLED__ = true;
 
+  const cachedManifests = [];
+  const cachedMetadata = [];
+  const cachedBlobs = [];
+
   function isNonMediaUrl(url) {
     if (!url || typeof url !== 'string') return true;
     const clean = url.split('?')[0].toLowerCase();
@@ -169,7 +173,7 @@
         if (m1) allKeys.add(m1[1]);
         const m2 = val.match(/urn:li:(?:activity|ugcPost|share):([0-9]{10,})/i);
         if (m2) allKeys.add(m2[1]);
-        const m3 = val.match(/([CD]\d{2}[A-Za-z0-9_-]{8,})/);
+        const m3 = val.match(/([CD][A-Za-z0-9_-]{8,})/);
         if (m3) allKeys.add(m3[1]);
       };
 
@@ -299,6 +303,8 @@
             const cloned = response.clone();
             cloned.text().then((text) => {
               if (text && (text.includes('<MPD') || text.includes('#EXTM3U'))) {
+                cachedManifests.push({ url, text, timestamp: Date.now() });
+                if (cachedManifests.length > 25) cachedManifests.shift();
                 window.dispatchEvent(new CustomEvent('__GARRETT_MANIFEST_CONTENT__', {
                   detail: { url, text, timestamp: Date.now() }
                 }));
@@ -320,6 +326,8 @@
                   const json = JSON.parse(text);
                   const metas = scanJsonForVideoMetadata(json);
                   for (const m of metas) {
+                    cachedMetadata.push({ ...m, timestamp: Date.now() });
+                    if (cachedMetadata.length > 60) cachedMetadata.shift();
                     window.dispatchEvent(new CustomEvent('__GARRETT_METADATA_DISCOVERED__', {
                       detail: { ...m, timestamp: Date.now() }
                     }));
@@ -365,6 +373,8 @@
               if (this.status >= 200 && this.status < 300 && this.responseText) {
                 const text = this.responseText;
                 if (text && (text.includes('<MPD') || text.includes('#EXTM3U'))) {
+                  cachedManifests.push({ url, text, timestamp: Date.now() });
+                  if (cachedManifests.length > 25) cachedManifests.shift();
                   window.dispatchEvent(new CustomEvent('__GARRETT_MANIFEST_CONTENT__', {
                     detail: { url, text, timestamp: Date.now() }
                   }));
@@ -373,6 +383,8 @@
                     const json = JSON.parse(text);
                     const metas = scanJsonForVideoMetadata(json);
                     for (const m of metas) {
+                      cachedMetadata.push({ ...m, timestamp: Date.now() });
+                      if (cachedMetadata.length > 60) cachedMetadata.shift();
                       window.dispatchEvent(new CustomEvent('__GARRETT_METADATA_DISCOVERED__', {
                         detail: { ...m, timestamp: Date.now() }
                       }));
@@ -396,8 +408,11 @@
       if (obj && typeof MediaSource !== 'undefined' && obj instanceof MediaSource) {
         const msId = 'ms_' + Math.random().toString(36).slice(2, 9);
         obj.__garrett_ms_id = msId;
+        const bDetail = { blobUrl, mediaSourceId: msId, timestamp: Date.now() };
+        cachedBlobs.push(bDetail);
+        if (cachedBlobs.length > 30) cachedBlobs.shift();
         window.dispatchEvent(new CustomEvent('__GARRETT_BLOB_CREATED__', {
-          detail: { blobUrl, mediaSourceId: msId, timestamp: Date.now() }
+          detail: bDetail
         }));
       }
       return blobUrl;
@@ -600,6 +615,18 @@
           }
         }));
       }
+    }
+  });
+
+  window.addEventListener('__GARRETT_REQUEST_CACHED_TELEMETRY__', () => {
+    for (const b of cachedBlobs) {
+      window.dispatchEvent(new CustomEvent('__GARRETT_BLOB_CREATED__', { detail: b }));
+    }
+    for (const m of cachedMetadata) {
+      window.dispatchEvent(new CustomEvent('__GARRETT_METADATA_DISCOVERED__', { detail: m }));
+    }
+    for (const mf of cachedManifests) {
+      window.dispatchEvent(new CustomEvent('__GARRETT_MANIFEST_CONTENT__', { detail: mf }));
     }
   });
 })();
