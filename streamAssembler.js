@@ -234,6 +234,7 @@
             let sMatch;
             let currentTime = 0;
             let currentNum = startNum;
+            let lastD = 0;
 
             while ((sMatch = sRegex.exec(timelineMatch[1])) !== null) {
               const sAttrs = sMatch[1];
@@ -243,6 +244,9 @@
 
               if (tVal) {
                 currentTime = parseInt(tVal, 10);
+              }
+              if (dVal > 0) {
+                lastD = dVal;
               }
 
               let count = 1;
@@ -263,6 +267,17 @@
                 segments.push(resolveUrl(segRaw, baseUrl));
                 currentNum++;
                 currentTime += dVal;
+              }
+            }
+
+            // Extrapolate to full presentation duration if manifest timeline only provided initial chunks
+            if (totalDurationSeconds > 0 && timescaleVal > 0 && lastD > 0) {
+              const maxTime = totalDurationSeconds * timescaleVal;
+              while (currentTime < maxTime) {
+                const segRaw = expandTemplate(mediaTpl, id, bandwidth, currentNum, currentTime);
+                segments.push(resolveUrl(segRaw, baseUrl));
+                currentNum++;
+                currentTime += lastD;
               }
             }
           } else if (durationVal > 0 && mediaTpl && totalDurationSeconds > 0) {

@@ -21,13 +21,17 @@
   function isManifestUrl(url) {
     if (isNonMediaUrl(url)) return false;
     const clean = url.split('?')[0].toLowerCase();
+    // Media fragments and init boxes are NEVER manifests
+    if (clean.endsWith('.m4s') || clean.endsWith('.ts') || clean.endsWith('.init') || clean.includes('init.mp4') || /\/[0-9]+\/[0-9]+$/.test(clean)) {
+      return false;
+    }
     return (
       clean.endsWith('.mpd') ||
       clean.includes('.mpd') ||
       clean.endsWith('.m3u8') ||
       clean.includes('.m3u8') ||
-      url.includes('/playlist/vid/dash/') ||
-      url.includes('/dash/') ||
+      clean.endsWith('/dash') ||
+      clean.includes('playlist.mpd') ||
       clean.includes('manifest')
     );
   }
@@ -44,7 +48,7 @@
 
   function isSegmentUrl(url) {
     if (isNonMediaUrl(url)) return false;
-    if (isManifestUrl(url) || isProgressiveMp4Url(url)) return false;
+    if (isProgressiveMp4Url(url)) return false;
     const clean = url.split('?')[0].toLowerCase();
     return (
       clean.endsWith('.m4s') ||
@@ -232,7 +236,7 @@
   }
 
   function inspectObjectForVideo(obj, depth = 0) {
-    if (!obj || depth > 4 || typeof obj !== 'object') return null;
+    if (!obj || depth > 8 || typeof obj !== 'object') return null;
     if (obj instanceof Node || obj === window || obj === document) return null;
 
     const parsed = parseVideoMetadata(obj);

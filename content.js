@@ -379,6 +379,8 @@
 
   function matchesVideoMetadata(videoState, meta) {
     if (!meta) return false;
+    if (videoRegistry.size === 1) return true;
+
     const targetKeys = [
       videoState.entityKey,
       videoState.mediaKey,
@@ -398,8 +400,8 @@
       }
     }
 
-    const vidDur = videoState.video ? (videoState.video.duration || 0) : 0;
-    if (vidDur > 5 && meta.duration > 5 && Math.abs(vidDur - meta.duration) <= 2.0) {
+    const vidDur = videoState.video ? (videoState.video.duration || 0) : (videoState.duration || 0);
+    if (vidDur > 3 && meta.duration > 3 && Math.abs(vidDur - meta.duration) <= 2.5) {
       return true;
     }
 
@@ -684,7 +686,9 @@
     try {
       const allMeta = extractAllEmbeddedVideoMetadata();
       for (const m of allMeta) {
-        if (matchesVideoMetadata(state, m)) {
+        const keyMatch = matchesVideoMetadata(state, m);
+        const singleMatch = allMeta.length === 1 || videoRegistry.size === 1;
+        if (keyMatch || singleMatch) {
           if (m.mediaKey) state.mediaKey = m.mediaKey;
           if (m.mediaKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
             state.entityKey = m.mediaKey;
@@ -1145,16 +1149,39 @@
         return;
       }
 
-      // Path 4: Complete Segment Queue from playback
-      const segs = (stream && stream.allSegments && stream.allSegments.length > 0)
+      // Path 3.5: Derived Manifest from Intercepted Segment URL
+      const candidateSegs = (stream && stream.allSegments && stream.allSegments.length > 0)
         ? stream.allSegments
         : (state.allSegments && state.allSegments.length > 0 ? state.allSegments : null);
+      if (candidateSegs && candidateSegs.length > 0) {
+        const segUrl = candidateSegs[0];
+        let derivedManifest = null;
+        if (segUrl.includes('/playlist/vid/')) {
+          if (segUrl.includes('/segment/')) {
+            derivedManifest = segUrl.replace(/\/segment\/[^\/]+\/[^\/?#]+/, '/dash/playlist.mpd');
+          } else if (/\/[0-9]+\/[0-9]+(?:\?|$)/.test(segUrl)) {
+            derivedManifest = segUrl.replace(/\/[0-9]+\/[0-9]+(\?|$)/, '/dash/playlist.mpd$1');
+          }
+        }
+        if (derivedManifest) {
+          try {
+            await downloadStreamInPage(state, derivedManifest);
+            return;
+          } catch (e) {
+            console.warn('[Garrett] Derived manifest download attempt:', e.message);
+          }
+        }
+      }
+
+      // Path 4: Complete Segment Queue from playback
+      const segs = candidateSegs;
       if (segs && segs.length > 0) {
         const vidDuration = state.video ? (state.video.duration || 0) : (state.duration || 0);
-        // Each segment is typically 2-4 seconds. If video duration is known (>15s),
-        // ensure we have enough segments to cover at least 80% of the full video.
-        const minExpectedSegments = vidDuration > 15 ? Math.floor((vidDuration * 0.8) / 4.0) : 1;
-        if (segs.length >= minExpectedSegments) {
+        // Each segment is typically 2-4 seconds. If video duration is known (>10s),
+        // ensure we have enough segments to cover at least 85% of the full video.
+        // Never save partial 1-2 segment cuts (under 3 segments)!
+        const minExpectedSegments = vidDuration > 10 ? Math.floor((vidDuration * 0.85) / 4.0) : 3;
+        if (segs.length >= minExpectedSegments && segs.length > 2) {
           await downloadFromSegmentQueue(state, segs);
           return;
         } else {
