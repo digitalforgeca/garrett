@@ -137,6 +137,11 @@ body {
   font-size: 12px;
   font-weight: 600;
   color: #f1f5f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 210px;
+  display: inline-block;
 }
 
 .video-meta-inline {

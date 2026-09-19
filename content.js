@@ -400,6 +400,9 @@
           if (meta.activityUrn && !state.activityUrn) {
             state.activityUrn = meta.activityUrn;
           }
+          if (meta.title && !state.title) {
+            state.title = meta.title;
+          }
         }
       }
     }
@@ -432,6 +435,7 @@
           }
           if (e.detail.mediaKey && !state.mediaKey) state.mediaKey = e.detail.mediaKey;
           if (e.detail.activityUrn && !state.activityUrn) state.activityUrn = e.detail.activityUrn;
+          if (e.detail.title && !state.title) state.title = e.detail.title;
           if (e.detail.duration && (!state.duration || state.duration <= 5)) {
             state.duration = e.detail.duration;
           }
@@ -543,6 +547,7 @@
       primaryKey: '',
       mediaKey: '',
       activityUrn: '',
+      title: '',
       allKeys: new Set()
     };
     if (!video) return info;
@@ -577,6 +582,8 @@
         info.allKeys.add(ytId);
         info.allKeys.add(`yt_${ytId}`);
         info.allKeys.add(`urn:youtube:video:${ytId}`);
+        const ytTitle = (typeof document !== 'undefined' && document.title) ? document.title.replace(/ - YouTube.*$/i, '').trim() : '';
+        if (ytTitle) info.title = ytTitle;
         return info;
       }
     }
@@ -1062,6 +1069,7 @@
         console.log(`[Garrett] Video element recycled for new post (old activity=${existingState.activityUrn}, new activity=${info.activityUrn})`);
         resetVideoStateForNewStream(existingState, curSrc);
         existingState.poster = curPoster;
+        existingState.title = info.title || '';
         existingState.activityUrn = info.activityUrn;
         existingState.mediaKey = info.mediaKey;
         existingState.entityKey = info.primaryKey || info.mediaKey || info.activityUrn;
@@ -1087,6 +1095,7 @@
               }
               if (m.mediaKey) existingState.mediaKey = m.mediaKey;
               if (m.duration && m.duration > 0 && (!existingState.duration || existingState.duration <= 5)) existingState.duration = m.duration;
+              if (m.title && !existingState.title) existingState.title = m.title;
               if (m.progressiveUrl) break;
             }
           }
@@ -1103,6 +1112,9 @@
         if (!existingState.mediaKey && info.mediaKey) {
           existingState.mediaKey = info.mediaKey;
           if (!existingState.entityKey || /^\d+$/.test(existingState.entityKey)) existingState.entityKey = info.mediaKey;
+        }
+        if (!existingState.title && info.title) {
+          existingState.title = info.title;
         }
         if (info.allKeys) {
           for (const k of info.allKeys) existingState.allKeys.add(k);
@@ -1125,6 +1137,7 @@
     const state = {
       id,
       video,
+      title: entityInfo.title || '',
       entityKey: entityInfo.primaryKey,
       mediaKey: entityInfo.mediaKey,
       activityUrn: entityInfo.activityUrn,
@@ -1163,6 +1176,7 @@
           }
           if (m.mediaKey) state.mediaKey = m.mediaKey;
           if (m.duration && m.duration > 0 && (!state.duration || state.duration <= 5)) state.duration = m.duration;
+          if (m.title && !state.title) state.title = m.title;
           if (m.mediaKey && (!state.entityKey || /^\d+$/.test(state.entityKey))) {
             state.entityKey = m.mediaKey;
           }
@@ -1236,6 +1250,7 @@
       action: 'registerVideo',
       video: {
         id: state.id,
+        title: state.title || '',
         src: src,
         entityKey: entityKey,
         mediaKey: state.mediaKey || '',
@@ -2434,6 +2449,7 @@
         const realDur = resolveRealVideoDuration(state);
         list.push({
           id: state.id,
+          title: state.title || '',
           src: currentSrc,
           isBlob: currentSrc.startsWith('blob:'),
           entityKey: state.entityKey,

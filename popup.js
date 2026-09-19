@@ -23,21 +23,38 @@ document.addEventListener('DOMContentLoaded', () => {
     return tab;
   }
 
+  function isRestrictedTab(tab) {
+    if (!tab || !tab.id) return true;
+    const url = tab.url || tab.pendingUrl || '';
+    if (!url) return false;
+    return (
+      url.startsWith('chrome://') ||
+      url.startsWith('chrome-extension://') ||
+      url.startsWith('brave://') ||
+      url.startsWith('edge://') ||
+      url.startsWith('about:') ||
+      url.startsWith('devtools://') ||
+      url.startsWith('view-source:') ||
+      url.includes('chromewebstore.google.com') ||
+      url.includes('chrome.google.com/webstore')
+    );
+  }
+
   async function ensureContentScriptInjected(tabId) {
     try {
       await chrome.tabs.sendMessage(tabId, { action: 'ping' });
     } catch {
       try {
         await chrome.scripting.insertCSS({
-          target: { tabId, allFrames: true },
+          target: { tabId },
           files: ['content.css']
         });
         await chrome.scripting.executeScript({
-          target: { tabId, allFrames: true },
+          target: { tabId },
           files: ['mux.min.js', 'keeper.js', 'streamAssembler.js', 'garrettQueue.js', 'content.js']
         });
-      } catch (err) {
-        console.warn('[Garrett] Script injection check:', err);
+      } catch {
+        // Silently ignore fallback injection errors on non-scriptable or cross-origin tabs/frames
       }
     }
   }
@@ -54,8 +71,8 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('brave://') || tab.url.startsWith('about:') || tab.url.startsWith('edge://'))) {
-      statusBar.innerHTML = '<span>Extensions cannot run on internal browser pages</span>';
+    if (isRestrictedTab(tab)) {
+      statusBar.innerHTML = '<span>Extensions cannot run on internal or restricted pages</span>';
       emptyState.style.display = 'block';
       return;
     }
@@ -81,6 +98,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (videos.length === 0 && netStreams.length > 0) {
         videos = netStreams.map((ns, idx) => ({
           id: ns.streamKey || `stream_${idx}`,
+          title: ns.title || '',
           src: ns.url || ns.blobUrl || '',
           duration: ns.duration || 0,
           width: ns.width || 0,
@@ -118,6 +136,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const card = document.createElement('div');
     card.className = 'video-card';
 
+    const videoTitle = video.title || matchedStream?.title || `Video ${index + 1}`;
     const durationText = formatTime(video.duration);
     const resText = (video.width && video.height) ? `${video.width}x${video.height}` : '';
     const audioText = video.muted ? 'Audio: No' : 'Audio: Yes';
@@ -138,7 +157,7 @@ document.addEventListener('DOMContentLoaded', () => {
       <div class="video-card-top">
         <div class="video-info">
           <div class="video-title-row">
-            <span class="video-title">Video ${index + 1}</span>
+            <span class="video-title" title="${videoTitle}">${videoTitle}</span>
           </div>
           <div class="video-meta-inline">
             ${metaParts.join('<span class="meta-dot">·</span>')}
@@ -268,7 +287,7 @@ document.addEventListener('DOMContentLoaded', () => {
       };
 
       const showError = (errMsg) => {
-        console.error('[Garrett] Keep error:', errMsg);
+        console.debug('[Garrett] Keep error:', errMsg);
         dlBtn.disabled = false;
         dlBtn.classList.remove('loading');
         dlBtn.title = errMsg || 'Error keeping video';
@@ -329,7 +348,7 @@ document.addEventListener('DOMContentLoaded', () => {
           chrome.runtime.onMessage.removeListener(progressListener);
         }
       } catch (err) {
-        console.warn('[Garrett] Keep video tab message error:', err);
+        console.debug('[Garrett] Keep video tab message error:', err);
         showError('Could not connect to tab');
         chrome.runtime.onMessage.removeListener(progressListener);
       }
